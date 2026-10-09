@@ -1,0 +1,538 @@
+# EARS — Arquitectura y flujo actual
+
+Actualmente, EARS está dividido en módulos con una separación clara entre **fuente de audio, protocolo, enlaces UART, estado y coordinación**.
+
+## Estructura actual
+
+```text
+src/
+├── main.cpp
+├── config.h
+│
+├── audio_source.h
+├── audio_source.cpp
+├── audio_source_file.h
+├── audio_source_file.cpp
+│
+├── audio_engine.h
+├── audio_engine.cpp
+│
+├── audio_protocol.h
+├── audio_protocol.cpp
+│
+├── control_protocol.h
+│
+├── wake_link.h
+├── wake_link.cpp
+│
+├── core_link.h
+├── core_link.cpp
+│
+├── ears_state.h
+└── ears_state.cpp
+```
+
+La idea general es esta:
+
+```text
+                ┌────────────────────┐
+                │   audio_source     │
+                │                    │
+                │ FILE_REPLAY ahora  │
+                │ MICROPHONE futuro  │
+                └─────────┬──────────┘
+                          │ PCM
+                          ▼
+                ┌────────────────────┐
+                │   audio_engine     │
+                │                    │
+                │ sequence global    │
+                │ routing de audio   │
+                └──────┬───────┬─────┘
+                       │       │
+                 siempre       │ si streamToCore
+                       │       │
+                       ▼       ▼
+                    WAKE      CORE
+```
+
+## `config.h`
+
+Centraliza la configuración común:
+
+```text
+Audio:
+16 kHz
+20 ms por frame
+320 samples
+640 bytes PCM16
+
+UART:
+921600 baud
+
+WAKE:
+TX GPIO4
+RX GPIO5
+
+CORE:
+TX GPIO6
+RX GPIO7
+```
+
+También define la fuente activa:
+
+```cpp
+AudioSourceType::FILE_REPLAY
+```
+
+Cuando llegue el micrófono, la idea es cambiar a:
+
+```cpp
+AudioSourceType::MICROPHONE
+```
+
+sin tocar el resto del pipeline.
+
+## `audio_source_file.*`
+
+Es el simulador actual de micrófono.
+
+```text
+LittleFS
+   ↓
+/test.raw
+   ↓
+lee 640 bytes
+   ↓
+espera 20 ms
+   ↓
+entrega frame PCM
+```
+
+Cuando llega al EOF:
+
+```text
+EOF
+ ↓
+espera 2 segundos
+ ↓
+reabre test.raw
+ ↓
+continúa
+```
+
+Importante: este módulo **no sabe nada de `sequence`, WAKE ni CORE**.
+
+## `audio_source.*`
+
+Es una capa de abstracción.
+
+El resto del programa llama:
+
+```cpp
+audioSourceBegin();
+audioSourceReadFrame(...);
+```
+
+y no necesita saber si abajo está:
+
+```text
+test.raw
+```
+
+o, más adelante:
+
+```text
+INMP441 por I²S
+```
+
+Hoy simplemente delega en `audio_source_file.*`.
+
+## `audio_engine.*`
+
+Es el núcleo del flujo de PCM.
+
+Tiene:
+
+```cpp
+static uint32_t sequence = 0;
+```
+
+y ese `sequence` es **continuo**.
+
+Ejemplo:
+
+```text
+primera reproducción:
+0 ... 2999
+
+segunda:
+3000 ... 5999
+
+tercera:
+6000 ... 8999
+```
+
+Nunca se resetea cuando `test.raw` vuelve al comienzo.
+
+Cada vez que obtiene un frame:
+
+```text
+audioSourceReadFrame()
+       ↓
+frame PCM #N
+       ↓
+       ├──► WAKE siempre
+       │
+       └──► CORE sólo si está habilitado
+```
+
+Después:
+
+```cpp
+sequence++;
+```
+
+Una sola vez.
+
+Esto garantiza que si WAKE y CORE reciben el mismo frame:
+
+```text
+WAKE → seq 1432
+CORE → seq 1432
+```
+
+## `audio_protocol.*`
+
+Define cómo viaja el PCM por UART.
+
+El paquete es:
+
+```text
+PCM!
+sequence u32
+payloadBytes u16
+PCM data
+```
+
+Para nuestros frames:
+
+```text
+4 bytes magic
+4 bytes sequence
+2 bytes length
+640 bytes PCM
+----------------
+650 bytes total
+```
+
+`audio_protocol` no decide a quién enviar ni incrementa `sequence`.
+
+Sólo serializa el paquete recibido.
+
+## `ears_state.*`
+
+Actualmente mantiene un estado principal:
+
+```text
+streamToCore
+```
+
+Inicialmente:
+
+```cpp
+false
+```
+
+Cuando llega el wake event:
+
+```cpp
+earsStartCoreStream();
+```
+
+pasa a:
+
+```cpp
+true
+```
+
+Entonces `audio_engine` empieza a duplicar PCM hacia CORE.
+
+## `wake_link.*`
+
+Maneja el UART bidireccional entre:
+
+```text
+EARS ↔ WAKE
+```
+
+En dirección:
+
+```text
+EARS → WAKE
+```
+
+manda:
+
+```text
+PCM!
+```
+
+continuamente.
+
+En dirección:
+
+```text
+WAKE → EARS
+```
+
+recibe:
+
+```text
+EVT!
+```
+
+El parser funciona como una máquina de estados:
+
+```text
+SEARCH_MAGIC
+    ↓
+READ_HEADER
+    ↓
+READ_PAYLOAD
+    ↓
+handleEvent()
+```
+
+Si el payload es demasiado grande:
+
+```text
+DISCARD_PAYLOAD
+```
+
+antes de volver a buscar otro `EVT!`.
+
+Esto evita desincronización.
+
+El evento implementado que realmente produce una acción hoy es:
+
+```text
+WAKE_WORD
+```
+
+Cuando llega:
+
+```text
+WAKE
+ │
+ │ EVT! WAKE_WORD
+ ▼
+EARS
+ │
+ └── earsStartCoreStream()
+```
+
+A partir del siguiente frame, CORE empieza a recibir audio.
+
+Los eventos futuros ya reservados son:
+
+```text
+LIGHTS_WORD
+STOP_WORD
+MUTE_WORD
+```
+
+pero todavía no tienen comportamiento real.
+
+## `control_protocol.h`
+
+Define el protocolo de eventos:
+
+```text
+EVT!
+version
+event
+payloadBytes
+payload...
+```
+
+Header:
+
+```text
+4 bytes magic
+1 byte version
+1 byte event
+2 bytes payloadBytes
+--------------------
+8 bytes
+```
+
+Actualmente se admiten payloads de hasta:
+
+```text
+32 bytes
+```
+
+Aunque todavía no se interpreta ninguno.
+
+Eso deja abierto, por ejemplo:
+
+```text
+WAKE_WORD
+confidence = 0.73
+```
+
+para el futuro.
+
+## `core_link.*`
+
+Actualmente CORE usa el segundo UART:
+
+```text
+EARS TX GPIO6 → CORE RX
+EARS RX GPIO7 ← CORE TX
+```
+
+Pero por ahora sólo está implementado:
+
+```text
+EARS → CORE
+PCM!
+```
+
+Todavía **no** está implementado:
+
+```text
+CORE → EARS
+CMD!
+```
+
+Eso corresponde al próximo item.
+
+## `main.cpp`
+
+Ahora actúa principalmente como coordinador.
+
+En `setup()`:
+
+```text
+Serial USB CDC
+    ↓
+wakeLinkBegin()
+    ↓
+coreLinkBegin()
+    ↓
+audioEngineBegin()
+```
+
+En `loop()`:
+
+```cpp
+wakeLinkProcessRx();
+```
+
+Es decir:
+
+```text
+audio task
+→ mueve PCM
+
+loop()
+→ procesa control recibido
+```
+
+La separación conceptual queda así:
+
+```text
+DATA PLANE
+audio_engine + PCM
+
+CONTROL PLANE
+EVT! / futuro CMD!
+```
+
+# Flujo completo actual
+
+Al arrancar:
+
+```text
+test.raw
+   ↓
+audio_source_file
+   ↓
+audio_source
+   ↓
+audio_engine
+   ↓
+PCM!
+   ↓
+WAKE
+```
+
+CORE todavía no recibe PCM porque:
+
+```text
+streamToCore = false
+```
+
+WAKE analiza el audio:
+
+```text
+PCM
+ ↓
+Edge Impulse
+ ↓
+detecta "walle"
+```
+
+Cuando WAKE empiece a emitir el evento:
+
+```text
+WAKE ── EVT! WAKE_WORD ──► EARS
+```
+
+EARS lo procesa así:
+
+```text
+wakeLinkProcessRx()
+        ↓
+handleEvent()
+        ↓
+earsStartCoreStream()
+```
+
+y queda:
+
+```text
+streamToCore = true
+```
+
+A partir de ahí:
+
+```text
+                    ┌── PCM! ──► WAKE
+audio_engine ───────┤
+                    └── PCM! ──► CORE
+```
+
+con el mismo `sequence` para ambos.
+
+# Estado actual de implementación
+
+```text
+1. EVT! con payload               ✅
+2. sequence continuo              ✅
+3. modularización EARS            ✅
+4. CORE RX / CMD!                 pendiente
+5. INMP441                        pendiente
+```
+
+Además, falta un paso práctico importante antes de avanzar demasiado con CORE:
+
+```text
+WAKE debe empezar a emitir realmente
+EVT! WAKE_WORD
+cuando Edge Impulse detecta la palabra.
+```
+
+Ese es el siguiente paso natural para validar el flujo completo EARS ↔ WAKE antes de agregar `CMD!` desde CORE.
