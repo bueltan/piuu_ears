@@ -3,6 +3,7 @@
 #include "wake_link.h"
 #include "core_link.h"
 #include "audio_engine.h"
+#include "uart_diagnostics.h"
 
 
 void setup()
@@ -37,7 +38,11 @@ void setup()
 
     wakeLinkBegin();
 
-    coreLinkBegin();
+    if (!coreLinkBegin())
+    {
+        Serial.println("[EARS] Cannot initialize CORE link");
+        while (true) delay(1000);
+    }
 
 
     // Give other controllers time to boot.
@@ -74,11 +79,8 @@ void loop()
      */
     wakeLinkProcessRx();
 
-    /*
-     * Later:
-     *
-     * coreLinkProcessRx();
-     */
+    coreLinkProcessRx();
+    UartDiagnostics::poll();
 
     delay(1);
 }

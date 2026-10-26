@@ -176,11 +176,11 @@ bool fileAudioSourceReadFrame(
     );
 
     Serial.println(
-        "[EARS] Restarting audio in 2 seconds..."
+        "[EARS] Restarting audio in 1 minute..."
     );
 
     vTaskDelay(
-        pdMS_TO_TICKS(2000)
+        pdMS_TO_TICKS(60000)
     );
 
     if (!openAudioFile())

@@ -1,538 +1,299 @@
-# EARS — Arquitectura y flujo actual
+# C3_EARS — fuente PCM, distribución y relay de control
 
-Actualmente, EARS está dividido en módulos con una separación clara entre **fuente de audio, protocolo, enlaces UART, estado y coordinación**.
-
-## Estructura actual
-
-```text
-src/
-├── main.cpp
-├── config.h
-│
-├── audio_source.h
-├── audio_source.cpp
-├── audio_source_file.h
-├── audio_source_file.cpp
-│
-├── audio_engine.h
-├── audio_engine.cpp
-│
-├── audio_protocol.h
-├── audio_protocol.cpp
-│
-├── control_protocol.h
-│
-├── wake_link.h
-├── wake_link.cpp
-│
-├── core_link.h
-├── core_link.cpp
-│
-├── ears_state.h
-└── ears_state.cpp
-```
-
-La idea general es esta:
+EARS mantiene separados fuente de audio, motor, enlaces UART, estado y protocolo.
+No interpreta turnos de conversación ni conoce el servidor.
 
 ```text
-                ┌────────────────────┐
-                │   audio_source     │
-                │                    │
-                │ FILE_REPLAY ahora  │
-                │ MICROPHONE futuro  │
-                └─────────┬──────────┘
-                          │ PCM
-                          ▼
-                ┌────────────────────┐
-                │   audio_engine     │
-                │                    │
-                │ sequence global    │
-                │ routing de audio   │
-                └──────┬───────┬─────┘
-                       │       │
-                 siempre       │ si streamToCore
-                       │       │
-                       ▼       ▼
-                    WAKE      CORE
+MIC / FILE -> audio_source -> audio_engine -> PCM! -> KEYWORD siempre
+                                         -> PCM! -> CORE si streamToCore
+KEYWORD -> EVT! -> wake_link -> core_link -> EVT! -> CORE
+CORE    -> CMD! -> core_link -> ears_state
 ```
 
-## `config.h`
+## Estado actual
 
-Centraliza la configuración común:
+- Fuente activa: MICROPHONE, INMP441 por I2S0 en ESP32-C3 SuperMini.
+- FILE_REPLAY sigue disponible como alternativa de compilación (`/test.raw` en LittleFS).
+- PCM16 little-endian, mono, 16000 Hz, 20 ms: 320 muestras / 640 bytes.
+- Secuencia global continua, incluso al repetir archivo y habilitar/deshabilitar CORE.
+- `streamToCore` comienza en false.
+- Cada WAKE_WORD válido se reenvía a CORE y habilita streaming. Los wake repetidos
+  también se reenvían: CORE decide si iniciar, ignorar o interrumpir una conversación.
+- Eventos distintos de WAKE no alteran el streaming; STOP_WORD no es STOP_AUDIO.
+- CORE puede habilitar el streaming desde touch mediante CMD! START_AUDIO.
+- EARS captura y distribuye audio; CORE y backend conservan la responsabilidad de conversación y cancelación.
+
+## Cableado
+
+Todos los enlaces UART: 921600 baud, 8N1, tierra común.
+
+| Enlace | EARS TX | EARS RX |
+|---|---|---|
+| KEYWORD (UART1) | GPIO4 -> KEYWORD RX | GPIO5 <- KEYWORD TX |
+| CORE (UART0) | GPIO6 -> CORE RX | GPIO7 <- CORE TX |
+
+Los pines de CORE deben asignarse según su hardware; no están definidos aquí.
+Serial de diagnóstico usa USB CDC. No mezclar logs con UART0/1 de datos.
+
+## Micrófono INMP441 — ESP32-C3 SuperMini
+
+| INMP441 | EARS |
+|---|---|
+| VDD / VCC | 3V3 (no conectar a 5V) |
+| GND | GND común |
+| SCK / BCLK | GPIO0 |
+| WS / LRCLK | GPIO1 |
+| SD / DOUT | GPIO3 |
+| L/R | 3V3: canal derecho |
+
+Los GPIO se configuran en `src/config.h`; no se superponen con los GPIO UART 4/5 y 6/7,
+ni con USB CDC (GPIO18/19). GPIO0/1/3 no son strapping pins del ESP32-C3.
+Usar cables cortos y compartir GND con KEYWORD y CORE.
+
+La fuente `src/audio_source_microphone.cpp` utiliza I2S0 master RX, formato I2S
+estándar, canal derecho y slots de 32 bits a 16000 Hz. Convierte las muestras
+INMP441 de 24 bits alineadas a la izquierda a PCM16 little-endian, en frames de
+320 muestras (20 ms). I2S/DMA marca el ritmo de captura: no añade la espera de
+20 ms usada por la fuente de archivo. Mantiene los mismos paquetes y routing
+hacia KEYWORD siempre y CORE cuando el streaming está habilitado.
+
+`MIC_PCM_SHIFT=16` conserva la escala de la señal. Si el nivel real resulta
+insuficiente, 15 duplica la ganancia y 14 la cuadruplica; la conversión satura
+antes de convertir a int16 para evitar wraparound. No replica el desplazamiento
+`raw >> 8` del legacy, que podía truncar los bits significativos.
+
+Con `EARS_MIC_DIAGNOSTICS=1` en `platformio.ini`, `[MIC]` resume cada cinco
+segundos: frames entregados, peak, mean_abs, muestras en los límites PCM16,
+lecturas fallidas/incompletas y eventos de desbordamiento RX DMA. Son contadores
+por intervalo; `clipped` incluye muestras exactamente en los límites, y
+`rx_overflow` cuenta eventos observados, no muestras perdidas. Cambiar a 0 para
+retirar esos cálculos, cola de eventos y logs. La inicialización y los errores
+de instalación siempre se imprimen. Un nivel permanentemente cero requiere
+revisar alimentación, SD y L/R; un nivel saturado requiere revisar ganancia.
+
+Para volver al archivo, seleccionar `AudioSourceType::FILE_REPLAY` en
+`src/config.h`, compilar y cargar. La selección es de compilación, sin cambios
+de fuente durante ejecución. En modo micrófono no se necesita cargar LittleFS.
+Solo EARS requiere firmware nuevo para esta incorporación. El mismo PCM sigue
+siendo compatible con CORE y KEYWORD; la detección real y los niveles deben
+validarse en hardware. El micrófono puede captar la salida del altavoz: esta
+fuente no implementa cancelación acústica de eco.
+
+## Contratos de paquetes
+
+UART es un flujo: los paquetes pueden llegar fragmentados o concatenados.
+Todos los enteros multibyte de estos protocolos UART son little-endian.
+El formato UART PCM! NO es el encabezado UDP PCM! de 18 bytes del servidor.
+
+### PCM! — EARS hacia KEYWORD/CORE
+
+| Offset | Bytes | Campo |
+|---|---|---|
+| 0 | 4 | `PCM!` |
+| 4 | 4 | sequence uint32 |
+| 8 | 2 | payloadBytes uint16 = 640 |
+| 10 | 640 | PCM16 mono |
+
+Total: 650 bytes, 50 frames/s (32500 bytes/s). CORE no debe esperar sequence=0.
+El receptor debe validar longitud, detectar discontinuidades y resincronizar.
+
+### EVT! — KEYWORD hacia EARS; EARS hacia CORE
+
+| Offset | Bytes | Campo |
+|---|---|---|
+| 0 | 4 | `EVT!` |
+| 4 | 1 | version = 1 |
+| 5 | 1 | event |
+| 6 | 2 | payloadBytes uint16, 0..32 |
+| 8 | variable | payload opaco |
+
+| Event | Código | Acción en EARS |
+|---|---|---|
+| NONE | 0x00 | Rechazado |
+| WAKE_WORD | 0x01 | Relay y habilitar audio |
+| LIGHTS_WORD | 0x02 | Relay |
+| STOP_WORD | 0x03 | Relay, sin detener audio |
+| MUTE_WORD | 0x04 | Relay |
+| CORE_STREAM_STATE | 0x80 | Generado por EARS, no aceptado desde KEYWORD |
+
+Otros códigos futuros se reenvían conservando código y payload, si la versión es
+1 y el tamaño no excede 32 bytes. EARS no interpreta el payload.
+Los códigos originales de KEYWORD y el encabezado EVT! no cambiaron.
+
+CORE_STREAM_STATE contiene exactamente un byte: 0=OFF, 1=ON. Se emite después
+de cada START_AUDIO/STOP_AUDIO válido, incluso si el estado ya era el solicitado.
+No es un nuevo turno ni confirma que CORE haya recibido muestras.
+
+### CMD! — CORE hacia EARS
+
+| Offset | Bytes | Campo |
+|---|---|---|
+| 0 | 4 | `CMD!` |
+| 4 | 1 | version = 1 |
+| 5 | 1 | command |
+| 6 | 2 | payloadBytes uint16 |
+| 8 | variable | payload |
+
+Comandos v1 implementados (sin payload, payloadBytes=0):
+
+- START_AUDIO = 0x01: habilita el envío de PCM a CORE.
+- STOP_AUDIO = 0x02: detiene el envío de PCM a CORE.
+
+Ejemplos hex:
 
 ```text
-Audio:
-16 kHz
-20 ms por frame
-320 samples
-640 bytes PCM16
-
-UART:
-921600 baud
-
-WAKE:
-TX GPIO4
-RX GPIO5
-
-CORE:
-TX GPIO6
-RX GPIO7
+START_AUDIO: 43 4D 44 21 01 01 00 00
+STOP_AUDIO:  43 4D 44 21 01 02 00 00
+Estado ON:  45 56 54 21 01 80 01 00 01
+Estado OFF: 45 56 54 21 01 80 01 00 00
 ```
 
-También define la fuente activa:
+Versión/comando desconocido o payload no vacío: sin cambio de estado ni confirmación.
+El framing reserva payloads de hasta 32 bytes para comandos futuros.
+START/STOP son idempotentes: CORE podrá repetirlos si no recibe estado en un plazo
+acotado; timeout y reintentos de CORE todavía no están implementados.
+STOP_AUDIO solo controla el transporte; cerrar un turno y enviar END/COMMIT es
+responsabilidad de CORE. No se debe detener por defecto durante la respuesta si
+se desea continuar recibiendo audio para una futura interrupción.
 
-```cpp
-AudioSourceType::FILE_REPLAY
+## Concurrencia, orden y recuperación
+
+- `audio_engine` conserva su tarea de producción/routing de PCM.
+- `loop` procesa control de ambos enlaces, como máximo 256 bytes por enlace/ciclo.
+- No se agregaron tareas ni colas. El relay escribe directamente al UART CORE.
+- `core_link` usa un mutex común para escribir paquetes PCM!/EVT! completos;
+  ningún evento puede insertarse entre el encabezado PCM y su payload.
+- Para el primer wake, EVT! se escribe antes de habilitar audio, bajo el mismo
+  mutex. Mientras ya hay streaming pueden llegar frames previos al nuevo wake.
+- START cambia el estado y escribe CORE_STREAM_STATE antes del siguiente PCM.
+- STOP espera a que termine cualquier paquete que esté escribiéndose. Puede
+  haber PCM previo en tránsito, pero después del estado OFF no se escribe nuevo
+  PCM hasta otro START o WAKE.
+- Enviar/leer controles no modifica la fuente, la secuencia ni el audio a KEYWORD.
+- El parser compartido es incremental y usa memoria fija. Descarta payloads
+  sobredimensionados sin almacenarlos y nunca interpreta magic dentro del payload.
+- Tras 100 ms sin progreso recibido, se descarta un control incompleto y se vuelve
+  a buscar magic. Una longitud corrupta con tráfico continuo puede consumir datos
+  hasta agotar la longitud declarada. No hay CRC, ACK de eventos ni entrega garantizada.
+- Si falla el TX del wake no se habilita inicialmente el audio. Se registra error;
+  otro wake o START explícito permite recuperar. No hay reintento automático.
+
+## Módulos
+
+- `config`: fuente, formato y pines.
+- `audio_source` / `audio_source_file`: producción PCM y pacing del replay.
+- `audio_engine`: secuencia global y distribución.
+- `audio_protocol`: serialización PCM! existente.
+- `control_protocol`: contratos EVT!/CMD!.
+- `control_parser`: framing incremental compartido, sin dependencia Arduino.
+- `wake_link`: RX de eventos KEYWORD y TX PCM hacia KEYWORD.
+- `core_link`: RX CMD, TX PCM/EVT y serialización de escritores.
+- `ears_state`: bandera atómica de streaming.
+- `main`: arranque y servicio de controles.
+
+## Verificación
+
+Compilación PlatformIO C3_EARS exitosa. No se cargó firmware ni se validó físicamente
+el enlace CORE. El flujo KEYWORD -> EARS wake ya estaba documentado como probado
+antes de esta ampliación; el relay/los comandos nuevos requieren prueba en placa.
+
+Prueba host de los módulos reales con UART/mutex simulados:
+
+```sh
+g++ -std=c++11 -pthread -I C3_EARS/test/link_host -I C3_EARS/src C3_EARS/test/link_host/test_link.cpp C3_EARS/src/core_link.cpp C3_EARS/src/wake_link.cpp C3_EARS/src/audio_protocol.cpp C3_EARS/src/ears_state.cpp -o /tmp/ears-test-link
+/tmp/ears-test-link
 ```
 
-Cuando llegue el micrófono, la idea es cambiar a:
+Cubre fragmentación, magic en payload, descarte de exceso, timeout/rollover,
+START/STOP, rechazo de controles inválidos, relay de payloads/eventos futuros,
+wake repetido y escritura concurrente de PCM/EVT sin intercalado de paquetes.
 
-```cpp
-AudioSourceType::MICROPHONE
+Próxima integración CORE: parser mixto PCM!/EVT!, comandos START/STOP y despacho
+de eventos al controlador. Comprobar en placa secuencia, pérdidas, tiempos de
+respuesta y que touch habilite audio antes de probar una conversación completa.
+
+
+## Diagnóstico del retorno KEYWORD → EARS
+
+Cada 5 segundos EARS informa `[WAKE_RX] bytes=... events=... invalid=...
+relay_errors=... sample=...`. Los contadores son acumulados desde el arranque;
+`sample` contiene únicamente los primeros 16 bytes recibidos durante ese intervalo.
+No imprime audio ni genera una tarea adicional.
+
+- `bytes=0` durante detecciones KEYWORD: la aplicación EARS no está leyendo bytes
+  del retorno; revisar firmware cargado y enlace, sin asumir una causa concreta.
+- Bytes crecientes sin eventos: comparar `sample` con el formato esperado.
+  Un WAKE sin payload es `45 56 54 21 01 01 00 00`.
+- `events` cuenta encabezados completos entregados por el parser;
+  `invalid` cuenta versiones/códigos rechazados por el handler. No cuenta todo
+  posible error de framing (por ejemplo magic incorrecto o payload excesivo).
+- `[EARS] EVT=1 payload=0 relay=OK` confirma lectura del wake y escritura hacia
+  CORE. No equivale a un ACK de CORE. El `tx=OK` de KEYWORD tampoco es un ACK
+  de EARS: el framework Arduino devuelve el tamaño solicitado en `write()`.
+
+Prueba cruzada sin placas: compila el **emisor de producción de C3_KEYWORD**
+con el parser y relay de producción de EARS; simula solo UART y FreeRTOS.
+Valida bytes exactos, fragmentación, wake repetido, eventos con payload máximo
+(incluido magic dentro del payload) y rechazo de argumentos inválidos.
+No verifica la señal eléctrica ni la temporización de UART en hardware.
+Desde el directorio que contiene ambos proyectos:
+
+```bash
+g++ -std=c++11 -pthread -I C3_EARS/test/link_host -I C3_EARS/src -I C3_KEYWORD/include C3_EARS/test/link_host/test_keyword.cpp C3_KEYWORD/src/ears_link.cpp C3_EARS/src/core_link.cpp C3_EARS/src/wake_link.cpp C3_EARS/src/audio_protocol.cpp C3_EARS/src/ears_state.cpp -o /tmp/ears-test-keyword
+/tmp/ears-test-keyword
 ```
 
-sin tocar el resto del pipeline.
+Revisión 2026-10-10: configuración coherente en ambos extremos (921600, 8N1,
+TX GPIO4 y RX GPIO5 cruzados); no se encontró incompatibilidad entre emisor y
+parser. El usuario informó que el enlace volvió a funcionar durante la revisión;
+la causa del fallo observado queda sin confirmar. No se modificaron el modelo,
+el umbral ni la lógica de activación.
 
-## `audio_source_file.*`
+## Optional UART diagnostics
 
-Es el simulador actual de micrófono.
+`EARS_UART_DIAGNOSTICS=1` in `platformio.ini` enables the current investigation.
+Set it to `0` and rebuild to remove all new timing probes, storage and summaries.
+Existing lifecycle/error logs remain independent of this switch.
 
-```text
-LittleFS
-   ↓
-/test.raw
-   ↓
-lee 640 bytes
-   ↓
-espera 20 ms
-   ↓
-entrega frame PCM
+Every five seconds, `UART_TX` reports a window of frame sequences, call counts,
+average/maximum microseconds and calls exceeding 20 ms. `wake_*` measures the
+EARS → KEYWORD write, `core_*` the EARS → CORE call including mutex wait, and
+`route_*` both destinations together. `core_n` counts attempted routing calls;
+a concurrent STOP can make core_link deliberately skip transmission.
+`AUDIO_PACING` measures intervals between ready frames: above 22 ms or below
+18 ms, with the maximum interval. The intentional EOF replay pause is excluded.
+These intervals include scheduling, source reads and previous routing time;
+they do not isolate scheduler delay alone.
+
+The audio task only reads three microsecond timestamps and accumulates counters
+under a short critical section. USB formatting runs in loop(), outside the lock.
+Windows are reset after snapshot; output and RAM are bounded. These diagnostics
+have a real, unmeasured hardware cost; compare with the flag disabled if needed.
+KEYWORD firmware/model, baud rate, UART buffers and PCM/EVT/CMD formats are unchanged.
+
+Host verification of the timing windows and disabled build:
+
+```sh
+g++ -std=c++11 -pthread -I C3_EARS/test/link_host -I C3_EARS/src C3_EARS/test/link_host/test_diagnostics.cpp C3_EARS/src/uart_diagnostics.cpp -o /tmp/ears-uart-diag
+/tmp/ears-uart-diag
 ```
 
-Cuando llega al EOF:
+Run from the parent projects directory. Add `-DEARS_UART_DIAGNOSTICS=0` for the
+disabled path; it must emit no new diagnostics.
 
-```text
-EOF
- ↓
-espera 2 segundos
- ↓
-reabre test.raw
- ↓
-continúa
+
+
+pio run -t uploadfs
+## Validación de captura INMP441 (2026-10-22)
+
+Prueba host de conversión y saturación PCM, desde el directorio Projects:
+
+```sh
+c++ -std=c++11 -Wall -Wextra -Werror -I C3_EARS/src C3_EARS/test/link_host/test_microphone_pcm.cpp -o /tmp/ears-test-microphone-pcm
+/tmp/ears-test-microphone-pcm
 ```
 
-Importante: este módulo **no sabe nada de `sequence`, WAKE ni CORE**.
-
-## `audio_source.*`
-
-Es una capa de abstracción.
-
-El resto del programa llama:
-
-```cpp
-audioSourceBegin();
-audioSourceReadFrame(...);
-```
-
-y no necesita saber si abajo está:
-
-```text
-test.raw
-```
-
-o, más adelante:
-
-```text
-INMP441 por I²S
-```
-
-Hoy simplemente delega en `audio_source_file.*`.
-
-## `audio_engine.*`
-
-Es el núcleo del flujo de PCM.
-
-Tiene:
-
-```cpp
-static uint32_t sequence = 0;
-```
-
-y ese `sequence` es **continuo**.
-
-Ejemplo:
-
-```text
-primera reproducción:
-0 ... 2999
-
-segunda:
-3000 ... 5999
-
-tercera:
-6000 ... 8999
-```
-
-Nunca se resetea cuando `test.raw` vuelve al comienzo.
-
-Cada vez que obtiene un frame:
-
-```text
-audioSourceReadFrame()
-       ↓
-frame PCM #N
-       ↓
-       ├──► WAKE siempre
-       │
-       └──► CORE sólo si está habilitado
-```
-
-Después:
-
-```cpp
-sequence++;
-```
-
-Una sola vez.
-
-Esto garantiza que si WAKE y CORE reciben el mismo frame:
-
-```text
-WAKE → seq 1432
-CORE → seq 1432
-```
-
-## `audio_protocol.*`
-
-Define cómo viaja el PCM por UART.
-
-El paquete es:
-
-```text
-PCM!
-sequence u32
-payloadBytes u16
-PCM data
-```
-
-Para nuestros frames:
-
-```text
-4 bytes magic
-4 bytes sequence
-2 bytes length
-640 bytes PCM
-----------------
-650 bytes total
-```
-
-`audio_protocol` no decide a quién enviar ni incrementa `sequence`.
-
-Sólo serializa el paquete recibido.
-
-## `ears_state.*`
-
-Actualmente mantiene un estado principal:
-
-```text
-streamToCore
-```
-
-Inicialmente:
-
-```cpp
-false
-```
-
-Cuando llega el wake event:
-
-```cpp
-earsStartCoreStream();
-```
-
-pasa a:
-
-```cpp
-true
-```
-
-Entonces `audio_engine` empieza a duplicar PCM hacia CORE.
-
-## `wake_link.*`
-
-Maneja el UART bidireccional entre:
-
-```text
-EARS ↔ WAKE
-```
-
-En dirección:
-
-```text
-EARS → WAKE
-```
-
-manda:
-
-```text
-PCM!
-```
-
-continuamente.
-
-En dirección:
-
-```text
-WAKE → EARS
-```
-
-recibe:
-
-```text
-EVT!
-```
-
-El parser funciona como una máquina de estados:
-
-```text
-SEARCH_MAGIC
-    ↓
-READ_HEADER
-    ↓
-READ_PAYLOAD
-    ↓
-handleEvent()
-```
-
-Si el payload es demasiado grande:
-
-```text
-DISCARD_PAYLOAD
-```
-
-antes de volver a buscar otro `EVT!`.
-
-Esto evita desincronización.
-
-El evento implementado que realmente produce una acción hoy es:
-
-```text
-WAKE_WORD
-```
-
-Cuando llega:
-
-```text
-WAKE
- │
- │ EVT! WAKE_WORD
- ▼
-EARS
- │
- └── earsStartCoreStream()
-```
-
-A partir del siguiente frame, CORE empieza a recibir audio.
-
-Los eventos futuros ya reservados son:
-
-```text
-LIGHTS_WORD
-STOP_WORD
-MUTE_WORD
-```
-
-pero todavía no tienen comportamiento real.
-
-## `control_protocol.h`
-
-Define el protocolo de eventos:
-
-```text
-EVT!
-version
-event
-payloadBytes
-payload...
-```
-
-Header:
-
-```text
-4 bytes magic
-1 byte version
-1 byte event
-2 bytes payloadBytes
---------------------
-8 bytes
-```
-
-Actualmente se admiten payloads de hasta:
-
-```text
-32 bytes
-```
-
-Aunque todavía no se interpreta ninguno.
-
-Eso deja abierto, por ejemplo:
-
-```text
-WAKE_WORD
-confidence = 0.73
-```
-
-para el futuro.
-
-## `core_link.*`
-
-Actualmente CORE usa el segundo UART:
-
-```text
-EARS TX GPIO6 → CORE RX
-EARS RX GPIO7 ← CORE TX
-```
-
-Pero por ahora sólo está implementado:
-
-```text
-EARS → CORE
-PCM!
-```
-
-Todavía **no** está implementado:
-
-```text
-CORE → EARS
-CMD!
-```
-
-Eso corresponde al próximo item.
-
-## `main.cpp`
-
-Ahora actúa principalmente como coordinador.
-
-En `setup()`:
-
-```text
-Serial USB CDC
-    ↓
-wakeLinkBegin()
-    ↓
-coreLinkBegin()
-    ↓
-audioEngineBegin()
-```
-
-En `loop()`:
-
-```cpp
-wakeLinkProcessRx();
-```
-
-Es decir:
-
-```text
-audio task
-→ mueve PCM
-
-loop()
-→ procesa control recibido
-```
-
-La separación conceptual queda así:
-
-```text
-DATA PLANE
-audio_engine + PCM
-
-CONTROL PLANE
-EVT! / futuro CMD!
-```
-
-# Flujo completo actual
-
-Al arrancar:
-
-```text
-test.raw
-   ↓
-audio_source_file
-   ↓
-audio_source
-   ↓
-audio_engine
-   ↓
-PCM!
-   ↓
-WAKE
-```
-
-CORE todavía no recibe PCM porque:
-
-```text
-streamToCore = false
-```
-
-WAKE analiza el audio:
-
-```text
-PCM
- ↓
-Edge Impulse
- ↓
-detecta "walle"
-```
-
-Cuando WAKE empiece a emitir el evento:
-
-```text
-WAKE ── EVT! WAKE_WORD ──► EARS
-```
-
-EARS lo procesa así:
-
-```text
-wakeLinkProcessRx()
-        ↓
-handleEvent()
-        ↓
-earsStartCoreStream()
-```
-
-y queda:
-
-```text
-streamToCore = true
-```
-
-A partir de ahí:
-
-```text
-                    ┌── PCM! ──► WAKE
-audio_engine ───────┤
-                    └── PCM! ──► CORE
-```
-
-con el mismo `sequence` para ambos.
-
-# Estado actual de implementación
-
-```text
-1. EVT! con payload               ✅
-2. sequence continuo              ✅
-3. modularización EARS            ✅
-4. CORE RX / CMD!                 pendiente
-5. INMP441                        pendiente
-```
-
-Además, falta un paso práctico importante antes de avanzar demasiado con CORE:
-
-```text
-WAKE debe empezar a emitir realmente
-EVT! WAKE_WORD
-cuando Edge Impulse detecta la palabra.
-```
-
-Ese es el siguiente paso natural para validar el flujo completo EARS ↔ WAKE antes de agregar `CMD!` desde CORE.
+Antes de dar por validado el micrófono, comprobar en hardware unos 250 frames
+por resumen de cinco segundos, nivel variable al hablar, ausencia de saturación
+y de errores/desbordamientos, wake desde KEYWORD y audio del turno en CORE.
+La prueba host no valida cableado, alineación I2S real ni niveles acústicos.

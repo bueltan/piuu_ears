@@ -1,6 +1,7 @@
 #include "audio_source.h"
 
 #include "audio_source_file.h"
+#include "audio_source_microphone.h"
 #include "config.h"
 
 
@@ -20,11 +21,10 @@ bool audioSourceBegin()
         case AudioSourceType::MICROPHONE:
 
             Serial.println(
-                "[EARS] Audio source: MICROPHONE "
-                "(not implemented yet)"
+                "[EARS] Audio source: MICROPHONE"
             );
 
-            return false;
+            return microphoneAudioSourceBegin();
     }
 
     return false;
@@ -48,16 +48,7 @@ bool audioSourceReadFrame(
 
         case AudioSourceType::MICROPHONE:
 
-            /*
-             * Futuro:
-             *
-             * return microphoneAudioSourceReadFrame(
-             *     buffer,
-             *     bufferSize
-             * );
-             */
-
-            return false;
+            return microphoneAudioSourceReadFrame(buffer, bufferSize);
     }
 
     return false;

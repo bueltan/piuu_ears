@@ -5,6 +5,7 @@
 #include "core_link.h"
 #include "ears_state.h"
 #include "config.h"
+#include "uart_diagnostics.h"
 
 #include <Arduino.h>
 
@@ -34,9 +35,10 @@ static void audioTask(void *parameter)
 
         if (!frameReady)
         {
+            UartDiagnostics::sourcePaused();
             /*
              * FILE_REPLAY devuelve false cuando llega al EOF,
-             * espera 2 segundos y vuelve a abrir el archivo.
+             * espera el intervalo configurado y vuelve a abrir el archivo.
              *
              * sequence NO se resetea.
              */
@@ -51,32 +53,25 @@ static void audioTask(void *parameter)
         // WAKE siempre recibe audio
         // ----------------------------------------------------
 
-        if (!wakeLinkSendAudio(
-                sequence,
-                audioBuffer,
-                FRAME_BYTES))
-        {
-            Serial.println(
-                "[EARS] WAKE UART TX error"
-            );
+#if EARS_UART_DIAGNOSTICS
+        const uint32_t readyUs=micros();
+#endif
+        const bool wakeOk=wakeLinkSendAudio(sequence,audioBuffer,FRAME_BYTES);
+#if EARS_UART_DIAGNOSTICS
+        const uint32_t wakeDoneUs=micros();
+#endif
+        const bool coreAttempted=earsIsStreamingToCore();
+        bool coreOk=true;
+        if(coreAttempted) {
+            coreOk=coreLinkSendAudio(sequence,audioBuffer,FRAME_BYTES);
         }
-
-        // ----------------------------------------------------
-        // CORE sólo recibe audio cuando está habilitado
-        // ----------------------------------------------------
-
-        if (earsIsStreamingToCore())
-        {
-            if (!coreLinkSendAudio(
-                    sequence,
-                    audioBuffer,
-                    FRAME_BYTES))
-            {
-                Serial.println(
-                    "[EARS] CORE UART TX error"
-                );
-            }
-        }
+#if EARS_UART_DIAGNOSTICS
+        const uint32_t routeDoneUs=micros();
+        UartDiagnostics::frame(sequence,readyUs,wakeDoneUs-readyUs,
+            routeDoneUs-wakeDoneUs,routeDoneUs-readyUs,coreAttempted,wakeOk,coreOk);
+#endif
+        if(!wakeOk) Serial.println("[EARS] WAKE UART TX error");
+        if(!coreOk) Serial.println("[EARS] CORE UART TX error");
 
         // ----------------------------------------------------
         // Este sequence pertenece al frame de audio global.
