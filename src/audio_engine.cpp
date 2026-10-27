@@ -8,6 +8,8 @@
 #include "uart_diagnostics.h"
 
 #include <Arduino.h>
+#include <atomic>
+static std::atomic<bool> pauseRequested{false}, parked{false};
 
 static uint8_t audioBuffer[FRAME_BYTES];
 
@@ -27,6 +29,12 @@ static void audioTask(void *parameter)
 
     for (;;)
     {
+        if(pauseRequested.load()) {
+            UartDiagnostics::sourcePaused();
+            parked.store(true);
+            while(pauseRequested.load())vTaskDelay(pdMS_TO_TICKS(1));
+            parked.store(false);
+        }
         const bool frameReady =
             audioSourceReadFrame(
                 audioBuffer,
@@ -131,3 +139,13 @@ bool audioEngineBegin()
 
     return true;
 }
+bool audioEnginePause() {
+    pauseRequested.store(true);
+    const uint32_t started=millis();
+    while(!parked.load()) {
+        if(uint32_t(millis()-started)>3000) {pauseRequested.store(false);return false;}
+        delay(1);
+    }
+    return true;
+}
+void audioEngineResume() {pauseRequested.store(false);while(parked.load())delay(1);}

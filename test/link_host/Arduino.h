@@ -46,6 +46,8 @@ public:
     explicit HardwareSerial(int n): id(n) {}
     void begin(uint32_t, int, int, int) {}
     void setRxBufferSize(size_t) {}
+    void flush() {}
+    void end() {serialData[id].rx.clear();}
     size_t write(const uint8_t *p, size_t n) {
         std::lock_guard<std::mutex> guard(serialData[id].mutex);
         serialData[id].tx.insert(serialData[id].tx.end(),p,p+n);

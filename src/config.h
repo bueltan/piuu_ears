@@ -70,3 +70,10 @@ constexpr bool micPinConflictsWithUart(int pin)
 static_assert(!micPinConflictsWithUart(MIC_BCLK_PIN) &&
     !micPinConflictsWithUart(MIC_WS_PIN) && !micPinConflictsWithUart(MIC_DATA_PIN),
     "Microphone and UART pins must differ");
+
+// Open-drain reset/strap controls. Board pull-ups release both signals high.
+static constexpr int CORE_EN_PIN = 10;
+static constexpr int CORE_BOOT_PIN = 2;
+static_assert(CORE_EN_PIN != CORE_BOOT_PIN &&
+    !micPinConflictsWithUart(CORE_EN_PIN) && !micPinConflictsWithUart(CORE_BOOT_PIN),
+    "CORE reset pins must not share UART pins");

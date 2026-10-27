@@ -85,3 +85,12 @@ bool coreLinkForwardEvent(uint8_t event, const uint8_t *payload, size_t size)
     xSemaphoreGive(txMutex);
     return ok;
 }
+
+// Only called with audio parked and loop RX dispatch disabled.
+void coreLinkPause() {
+    coreSerial.flush();coreSerial.end();
+    commandParser=ControlParser(CMD_MAGIC, handleCommand);
+}
+void coreLinkResume() {
+    coreSerial.begin(UART_BAUD,SERIAL_8N1,CORE_RX_PIN,CORE_TX_PIN);
+}

@@ -26,3 +26,5 @@ bool wakeLinkSendAudio(
     const uint8_t *pcm,
     size_t payloadBytes
 );
+void wakeLinkPause();
+void wakeLinkResume();

@@ -297,3 +297,172 @@ Antes de dar por validado el micrófono, comprobar en hardware unos 250 frames
 por resumen de cinco segundos, nivel variable al hablar, ausencia de saturación
 y de errores/desbordamientos, wake desde KEYWORD y audio del turno en CORE.
 La prueba host no valida cableado, alineación I2S real ni niveles acústicos.
+
+## Cargar PIUU_CORE a través de EARS (modo mantenimiento)
+
+El firmware normal `esp32-c3-ears` incluye el puente. El script envía la línea
+`PIUU BRIDGE` por USB; EARS espera el final del frame en curso, detiene I2S,
+drena y cierra los UART de CORE/KEYWORD y confirma `PIUU BRIDGE READY`.
+Durante mantenimiento no hay PCM, eventos ni logs de aplicación sobre USB.
+No se guarda el modo en NVS ni se reprograma la flash de EARS al cambiar de modo.
+
+Después de `info` o `flash` exitosos, el script reinicia CORE y solicita EXIT.
+EARS confirma EXIT antes de restaurar UART a 921600, I2S y audio; el stream a
+CORE queda desactivado hasta un nuevo START/wake. El audio hacia KEYWORD vuelve
+normalmente. Las tramas y eventos pendientes anteriores se descartan.
+
+Ante desconexión o fallo de carga, EARS permanece en mantenimiento sin resetear
+CORE automáticamente. `run` permite resetear CORE y salir explícitamente.
+`diagnose` también permanece en mantenimiento para inspeccionar el arranque.
+Reiniciar EARS vuelve al modo normal porque el modo solo vive en RAM; esto no
+garantiza que una aplicación de CORE parcialmente escrita pueda arrancar.
+El entorno `esp32-c3-core-bridge` se conserva como alternativa dedicada: con él
+sí hay que reinstalar el firmware normal para recuperar audio.
+
+### Conexiones
+
+| EARS (ESP32-C3) | PIUU_CORE (ESP32 CYD) |
+| --- | --- |
+| GPIO6 / TX | GPIO3 / RX0 |
+| GPIO7 / RX | GPIO1 / TX0 |
+| GPIO10 | EN |
+| GPIO2 | GPIO0 / BOOT |
+| GND | GND |
+
+Señales de 3,3 V y alimentación estable de ambas placas. El USB nativo de EARS
+(GPIO18/19) conecta al PC. EN/BOOT se manejan como open-drain: LOW para activar,
+HIGH para liberar con los pull-ups de CORE. GPIO2 también es strapping en C3:
+debe quedar liberado durante el reset de EARS. No mantener BOOT de CORE pulsado
+mientras arranca EARS. El TX del conversor USB-UART integrado en CYD no debe
+competir con EARS sobre RX0; comprobar aislamiento si sigue alimentado aunque
+el cable USB de CYD esté desconectado.
+
+### Procedimiento desde la carpeta Projects
+
+Cerrar monitores seriales. Los comandos siguientes realizan cargas reales;
+las pruebas automáticas del proyecto no escriben firmware en las placas.
+
+```bash
+# 1. Instalar EARS con el puente integrado (solo una vez para adoptar esta versión).
+~/.platformio/penv/bin/pio run -d C3_EARS -e esp32-c3-ears -t upload
+
+# 2. Compilar CORE para el nuevo cableado. Usar cyd2usb-uart0 para ST7789.
+~/.platformio/penv/bin/pio run -d PIUU_CORE -e cyd-uart0
+
+# 3. Probar el enlace y el chip de destino sin escribir flash (sí resetea CORE).
+~/.platformio/penv/bin/python C3_EARS/tools/core_bridge.py --port /dev/esp32-ears info
+
+# 4. Cargar bootloader, particiones, boot_app0 y aplicación, y resetear CORE.
+~/.platformio/penv/bin/python C3_EARS/tools/core_bridge.py --port /dev/esp32-ears flash --build-dir PIUU_CORE/.pio/build/cyd-uart0
+
+# EARS vuelve al modo normal automáticamente: no hay que reflashearlo.
+```
+
+El script requiere `pyserial` y `esptool` 5.x en el mismo Python. El entorno de
+PlatformIO usado aquí ya los incluye. En otro entorno: `python -m pip install
+pyserial 'esptool>=5,<6'`. `--port` puede apuntar a `/dev/ttyACM0` u otro puerto.
+Si `boot_app0.bin` no está junto al build, se busca en el paquete Arduino de
+PlatformIO (`PLATFORMIO_CORE_DIR` o `~/.platformio`); `flash --boot-app0 PATH`
+permite indicar la ruta exacta. El mapa de offsets es el de este CORE ESP32:
+0x1000, 0x8000, 0xe000 y 0x10000; no usar builds de otras placas.
+
+Si una carga falla, no se reinicia CORE automáticamente. La orden BOOT se envió,
+pero solo una respuesta del chip confirma que realmente entró en descarga. Para
+arrancar su aplicación explícitamente:
+
+```bash
+~/.platformio/penv/bin/python C3_EARS/tools/core_bridge.py --port /dev/esp32-ears run
+```
+
+No usar esptool directamente sobre el puerto USB de EARS para cargar CORE:
+DTR/RTS pueden resetear EARS. El script abre USB con ambas señales desactivadas,
+controla EN/BOOT mediante comandos y expone un socket local efímero para esptool,
+con `--chip esp32 --before no-reset --after no-reset --baud 115200`.
+El destino se verifica como ESP32, no ESP32-C3. La carga verifica el hash mediante
+esptool y no usa `erase-flash`. Actualizar el mapa de particiones sí puede afectar
+la interpretación de datos existentes; usar el build correspondiente de CORE.
+
+### Transporte y validación
+
+USB usa frames `EB | type:u8 | length:u16le | payload | crc16:u16le`.
+CRC-16/CCITT-FALSE cubre type, length y payload; máximo 256 bytes por frame.
+Tipos: PING=1, BOOT=2, RUN=3, DATA=4, ACK=5, ERROR=6, EXIT=7. ACK contiene el tipo
+confirmado; ACK(PING) añade el byte 1 si soporta salida al firmware normal. BOOT mantiene EN/BOOT bajos 100 ms, libera EN, espera 100 ms y libera
+BOOT; RUN libera BOOT y pulsa EN. UART queda fijo en 115200 durante programación.
+Cada DATA se confirma después de entregarlo al UART: el host mantiene un solo
+bloque pendiente para no desbordar buffers. Nunca interpreta escapes dentro del
+firmware transmitido. Los buffers son fijos, se respetan escrituras parciales y
+se aborta ante errores CRC; la comunicación de audio normal sigue a 921600.
+
+```bash
+g++ -std=c++11 -Wall -Wextra -I C3_EARS/test/bridge/mocks -I C3_EARS/src C3_EARS/test/bridge/test_bridge.cpp -o /tmp/piuu-bridge-test
+/tmp/piuu-bridge-test
+python3 C3_EARS/test/bridge/test_host.py
+```
+
+Las pruebas cubren reset/strapping, todos los bytes binarios, escrituras parciales,
+CRC y compatibilidad C++/Python. El puente dedicado ya se validó en hardware;
+la transición integrada y recuperación del audio quedan por validar en la placa.
+Referencia: [USB Serial/JTAG de ESP32-C3](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c3/api-guides/usb-serial-jtag-console.html)
+y [modo de arranque de ESP32](https://docs.espressif.com/projects/esptool/en/latest/esp32/advanced-topics/boot-mode-selection.html).
+
+
+### Diagnóstico: USB abre pero esptool no recibe datos
+
+Abrir el monitor solo confirma acceso al USB de EARS. El firmware puente no
+imprime texto de bienvenida. El aviso de VID/PID sobre `socket://` indica que
+esptool no puede consultar la identidad USB a través del socket local; no
+confirma un fallo de USB ni que CORE haya entrado en descarga.
+
+Desde **C3_EARS**, cerrar el monitor, actualizar el puente y capturar el arranque:
+
+```bash
+~/.platformio/penv/bin/pio run -e esp32-c3-ears -t upload
+~/.platformio/penv/bin/python tools/core_bridge.py --port /dev/esp32-ears diagnose
+~/.platformio/penv/bin/python tools/core_bridge.py --port /dev/esp32-ears info
+```
+
+`diagnose` resetea CORE y recoge hasta 4096 bytes durante dos segundos, sin
+escribir flash. `DOWNLOAD_BOOT` / `waiting for download` indican arranque para
+programación; `SPI_FAST_FLASH_BOOT` indica arranque normal y requiere revisar
+BOOT/GPIO0. Cero bytes requiere comprobar alimentación, GND, EN y el camino
+CORE GPIO1 TX → EARS GPIO7 RX; una ROM silenciada también puede dar cero bytes.
+Si hay banner de descarga pero no sincroniza, revisar EARS GPIO6 TX → CORE
+GPIO3 RX y posible contención del conversor USB-UART integrado en CYD.
+
+`info`/`flash` imprimen contadores incluso si falla esptool:
+`host_to_uart_bytes`, `data_acks` y `uart_to_host_bytes`. ACK indica que EARS
+entregó el bloque al driver UART, no que CORE lo haya recibido. No interpretar
+la confirmación BOOT de EARS como confirmación del modo de arranque de CORE.
+
+
+### Uso desde C3_EARS con el firmware integrado
+
+```bash
+# Instalar una sola vez esta versión de EARS.
+~/.platformio/penv/bin/pio run -e esp32-c3-ears -t upload
+# Cargas posteriores: el script entra y sale del mantenimiento automáticamente.
+~/.platformio/penv/bin/python tools/core_bridge.py --port /dev/esp32-ears flash --build-dir ../PIUU_CORE/.pio/build/cyd-uart0
+# Recuperación explícita tras fallo o diagnose (resetea CORE y reactiva EARS).
+~/.platformio/penv/bin/python tools/core_bridge.py --port /dev/esp32-ears run
+```
+
+La entrada espera hasta tres segundos a que audio reconozca la pausa; si no lo
+hace, rechaza mantenimiento y conserva los UART normales. No se suspende una
+tarea en mitad de una escritura ni manteniendo un mutex. El protocolo binario
+solo se habilita después de detener los productores de logs. EXIT se lee hasta
+su ACK sin consumir los logs que reaparecen al reanudar. El helper conserva
+compatibilidad con el puente dedicado; detectarlo puede añadir cuatro segundos.
+
+Validación adicional desde Projects:
+
+```bash
+g++ -std=c++11 -pthread -Wall -Wextra -I C3_EARS/test/audio_pause/mocks -I C3_EARS/src C3_EARS/test/audio_pause/test_pause.cpp -o /tmp/ears-audio-pause
+/tmp/ears-audio-pause
+g++ -std=c++11 -Wall -Wextra -I C3_EARS/test/bridge/mocks -I C3_EARS/src C3_EARS/test/bridge/test_integrated.cpp -o /tmp/ears-integrated-test
+/tmp/ears-integrated-test
+```
+
+En hardware comprobar `info` → vuelta de audio, carga completa → conversación,
+y desconexión durante mantenimiento → recuperación con `run` o nueva carga.
+Cerrar el monitor antes de ejecutar el helper; solo un proceso debe abrir USB.

@@ -72,3 +72,12 @@ void wakeLinkProcessRx()
     }
     reportRx(millis());
 }
+
+// Only called with audio parked and loop RX dispatch disabled.
+void wakeLinkPause() {
+    wakeSerial.flush();wakeSerial.end();
+    eventParser=ControlParser(EVT_MAGIC, handleEvent);
+}
+void wakeLinkResume() {
+    wakeSerial.begin(UART_BAUD,SERIAL_8N1,WAKE_RX_PIN,WAKE_TX_PIN);
+}

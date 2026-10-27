@@ -127,3 +127,12 @@ bool microphoneAudioSourceReadFrame(uint8_t *buffer, size_t bufferSize)
     // I2S DMA paces live capture. No additional 20 ms task delay is needed.
     return true;
 }
+
+// Called only after the audio task has acknowledged its frame-boundary pause.
+void microphoneAudioSourceEnd() {
+    if(initialized) {i2s_driver_uninstall(kMicPort);initialized=false;}
+#if EARS_MIC_DIAGNOSTICS
+    events=nullptr;
+    frames=errors=overflows=clipped=peak=0;absoluteSum=0;
+#endif
+}

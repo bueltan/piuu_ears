@@ -53,3 +53,11 @@ bool audioSourceReadFrame(
 
     return false;
 }
+
+void audioSourcePause() {
+    if(AUDIO_SOURCE==AudioSourceType::MICROPHONE)microphoneAudioSourceEnd();
+}
+bool audioSourceResume() {
+    if(AUDIO_SOURCE==AudioSourceType::MICROPHONE)return microphoneAudioSourceBegin();
+    fileAudioSourceResume();return true;
+}

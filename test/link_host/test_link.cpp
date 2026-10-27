@@ -99,5 +99,11 @@ int main() {
         }
     }
     assert(audios==100 && events==100);
+    serialData[0].tx.clear();earsStopCoreStream();
+    inject(1,{'E','V'});wakeLinkProcessRx();
+    wakeLinkPause();coreLinkPause();wakeLinkResume();coreLinkResume();
+    inject(1,{'T','!',1,1,0,0});wakeLinkProcessRx();
+    assert(serialData[0].tx.empty() && !earsIsStreamingToCore());
+    inject(1,wake);wakeLinkProcessRx();assert(serialData[0].tx==wake);
     puts("PASS: framing, timeout, commands, event relay and concurrent PCM/EVT serialization");
 }

@@ -219,3 +219,4 @@ bool fileAudioSourceReadFrame(
      */
     return false;
 }
+void fileAudioSourceResume() { lastWakeTime=xTaskGetTickCount(); }
