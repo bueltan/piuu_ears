@@ -4,8 +4,8 @@ EARS mantiene separados fuente de audio, motor, enlaces UART, estado y protocolo
 No interpreta turnos de conversación ni conoce el servidor.
 
 ```text
-MIC / FILE -> audio_source -> audio_engine -> PCM! -> KEYWORD siempre
-                                         -> PCM! -> CORE si streamToCore
+MIC / FILE -> audio_source -> audio_engine -> PCM! -> KEYWORD si !streamToCore
+                                           -> PCM! -> CORE si streamToCore
 KEYWORD -> EVT! -> wake_link -> core_link -> EVT! -> CORE
 CORE    -> CMD! -> core_link -> ears_state
 ```
@@ -17,6 +17,9 @@ CORE    -> CMD! -> core_link -> ears_state
 - PCM16 little-endian, mono, 16000 Hz, 20 ms: 320 muestras / 640 bytes.
 - Secuencia global continua, incluso al repetir archivo y habilitar/deshabilitar CORE.
 - `streamToCore` comienza en false.
+- KEYWORD recibe audio mientras CORE esté inactivo (`streamToCore==false`). Al activarse
+  una conversación con CORE (`streamToCore==true`), el envío hacia KEYWORD se pausa
+  para evitar inferencias innecesarias durante la conversación o por el eco del altavoz.
 - Cada WAKE_WORD válido se reenvía a CORE y habilita streaming. Los wake repetidos
   también se reenvían: CORE decide si iniciar, ignorar o interrumpir una conversación.
 - Eventos distintos de WAKE no alteran el streaming; STOP_WORD no es STOP_AUDIO.

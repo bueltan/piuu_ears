@@ -58,28 +58,35 @@ static void audioTask(void *parameter)
         }
 
         // ----------------------------------------------------
-        // WAKE siempre recibe audio
+        // WAKE recibe audio solo si CORE no esta en streaming
         // ----------------------------------------------------
 
+        const bool coreAttempted=earsIsStreamingToCore();
+        const bool wakeAttempted=!coreAttempted;
 #if EARS_UART_DIAGNOSTICS
         const uint32_t readyUs=micros();
+        uint32_t wakeDoneUs=readyUs;
 #endif
-        const bool wakeOk=wakeLinkSendAudio(sequence,audioBuffer,FRAME_BYTES);
+        bool wakeOk=true;
+        if(wakeAttempted) {
+            wakeOk=wakeLinkSendAudio(sequence,audioBuffer,FRAME_BYTES);
 #if EARS_UART_DIAGNOSTICS
-        const uint32_t wakeDoneUs=micros();
+            wakeDoneUs=micros();
 #endif
-        const bool coreAttempted=earsIsStreamingToCore();
+        }
         bool coreOk=true;
         if(coreAttempted) {
             coreOk=coreLinkSendAudio(sequence,audioBuffer,FRAME_BYTES);
         }
 #if EARS_UART_DIAGNOSTICS
         const uint32_t routeDoneUs=micros();
-        UartDiagnostics::frame(sequence,readyUs,wakeDoneUs-readyUs,
-            routeDoneUs-wakeDoneUs,routeDoneUs-readyUs,coreAttempted,wakeOk,coreOk);
+        UartDiagnostics::frame(sequence,readyUs,
+            wakeAttempted ? (wakeDoneUs-readyUs) : 0,
+            coreAttempted ? (routeDoneUs-(wakeAttempted ? wakeDoneUs : readyUs)) : 0,
+            routeDoneUs-readyUs,coreAttempted,wakeOk,coreOk);
 #endif
-        if(!wakeOk) Serial.println("[EARS] WAKE UART TX error");
-        if(!coreOk) Serial.println("[EARS] CORE UART TX error");
+        if(wakeAttempted && !wakeOk) Serial.println("[EARS] WAKE UART TX error");
+        if(coreAttempted && !coreOk) Serial.println("[EARS] CORE UART TX error");
 
         // ----------------------------------------------------
         // Este sequence pertenece al frame de audio global.

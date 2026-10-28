@@ -28,10 +28,15 @@ void frame(uint32_t sequence,uint32_t readyUs,uint32_t wakeUs,uint32_t coreUs,
     portENTER_CRITICAL(&lock);
     if(!window.frames)window.first=sequence;
     ++window.frames;window.last=sequence;
-    window.wake.add(wakeUs);window.route.add(routeUs);
-    if(coreAttempted)window.core.add(coreUs);
-    if(!wakeOk)++window.wakeErrors;
-    if(coreAttempted && !coreOk)++window.coreErrors;
+    if(!coreAttempted || wakeUs) {
+        window.wake.add(wakeUs);
+        if(!wakeOk)++window.wakeErrors;
+    }
+    window.route.add(routeUs);
+    if(coreAttempted) {
+        window.core.add(coreUs);
+        if(!coreOk)++window.coreErrors;
+    }
     if(havePrevious) {
         ++window.periods;
         if(period>window.maxPeriod)window.maxPeriod=period;

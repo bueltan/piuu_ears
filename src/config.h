@@ -34,8 +34,14 @@ static constexpr int MIC_DATA_PIN = 3;
 // Signed 24-bit microphone samples arrive left-aligned in 32-bit I2S slots.
 // Shift 16 gives PCM16 at unity gain; 15 doubles gain, 14 quadruples it.
 // Conversion saturates instead of wrapping when gain exceeds full scale.
-static constexpr unsigned MIC_PCM_SHIFT = 16;
+static constexpr unsigned MIC_PCM_SHIFT = 15;
 static_assert(MIC_PCM_SHIFT >= 8 && MIC_PCM_SHIFT <= 24, "Invalid microphone PCM shift");
+
+// Initial setting, to be tuned from MIC_START measurements in silence.
+#ifndef EARS_MIC_STARTUP_MUTE_MS
+#define EARS_MIC_STARTUP_MUTE_MS 1000u
+#endif
+static_assert(EARS_MIC_STARTUP_MUTE_MS % FRAME_MS == 0, "Startup mute must span whole frames");
 
 #ifndef EARS_MIC_DIAGNOSTICS
 #define EARS_MIC_DIAGNOSTICS 1

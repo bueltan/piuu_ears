@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28
+
+- Pause PCM routing to KEYWORD while streaming to CORE (`streamToCore=true`) to avoid wake-word inference during active conversations.
+- Increase INMP441 microphone gain (`MIC_PCM_SHIFT=15`, doubling PCM amplitude) to improve pickup at distance.
+- Add sample-paced microphone warmup mute (`EARS_MIC_STARTUP_MUTE_MS=1000`) to suppress initial power-on transients.
+
 ## 2026-10-27
 
 - Integrate USB-triggered maintenance into normal EARS firmware with cooperative audio pause and UART handoff.

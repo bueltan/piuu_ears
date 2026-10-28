@@ -2,9 +2,10 @@
 #include "audio_engine.cpp"
 #include <cassert>
 static std::atomic<unsigned> reads{0},wakeFrames{0},coreFrames{0};
+static std::atomic<bool> streamingToCore{false};
 bool audioSourceBegin(){return true;}
 bool audioSourceReadFrame(uint8_t*,size_t){vTaskDelay(2);++reads;return true;}
-bool earsIsStreamingToCore(){return true;}
+bool earsIsStreamingToCore(){return streamingToCore.load();}
 bool wakeLinkSendAudio(uint32_t,const uint8_t*,size_t){++wakeFrames;delay(2);return true;}
 bool coreLinkSendAudio(uint32_t,const uint8_t*,size_t){++coreFrames;return true;}
 int main(){
@@ -12,10 +13,15 @@ int main(){
     while(reads.load()<3)delay(1);
     for(int i=0;i<3;++i){
         assert(audioEnginePause());
-        const auto n=reads.load();assert(wakeFrames.load()==n && coreFrames.load()==n);
-        delay(20);assert(reads.load()==n && wakeFrames.load()==n && coreFrames.load()==n);
+        const auto n=reads.load();assert(wakeFrames.load()==n && coreFrames.load()==0);
+        delay(20);assert(reads.load()==n && wakeFrames.load()==n && coreFrames.load()==0);
         audioEngineResume();while(reads.load()==n)delay(1);
     }
+    // Now verify mutual exclusion: streaming to core pauses wake delivery
+    streamingToCore.store(true);
+    const auto wakeBefore=wakeFrames.load();
+    while(coreFrames.load()<3)delay(1);
+    assert(wakeFrames.load()==wakeBefore);
     assert(audioEnginePause());finish.store(true);worker.join();
     puts("PASS: cooperative audio pause drains both routes and resumes repeatedly");
 }

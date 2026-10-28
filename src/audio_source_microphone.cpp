@@ -2,6 +2,8 @@
 
 #include "config.h"
 #include "microphone_pcm.h"
+#include "microphone_startup.h"
+#include <math.h>
 #include <driver/i2s.h>
 #include <esp_intr_alloc.h>
 #include <string.h>
@@ -11,11 +13,16 @@ constexpr i2s_port_t kMicPort = I2S_NUM_0;
 constexpr uint32_t kReadTimeoutMs = 100;
 int32_t rawFrame[FRAME_SAMPLES];
 bool initialized = false;
+MicrophoneStartup startup;
+bool wasMuted=false;
 #if EARS_MIC_DIAGNOSTICS
 QueueHandle_t events = nullptr;
 uint32_t frames = 0, errors = 0, overflows = 0, clipped = 0;
 uint32_t peak = 0, lastReport = 0;
 uint64_t absoluteSum = 0;
+uint64_t startupSquares=0;
+int64_t startupSum=0;
+uint32_t startupPeak=0,startupNearFull=0,startupCount=0,lastNearFullMs=0;
 
 void reportDiagnostics()
 {
@@ -74,13 +81,18 @@ bool microphoneAudioSourceBegin()
         i2s_driver_uninstall(kMicPort);
         return false;
     }
+    startup.reset(SAMPLE_RATE_HZ,EARS_MIC_STARTUP_MUTE_MS);
+    wasMuted=EARS_MIC_STARTUP_MUTE_MS>0;
     initialized = true;
 #if EARS_MIC_DIAGNOSTICS
     lastReport = millis();
+    startupSquares=0;startupSum=0;startupPeak=startupNearFull=startupCount=lastNearFullMs=0;
 #endif
     Serial.printf("[MIC] INMP441 I2S0 BCLK=%d WS=%d SD=%d, %lu Hz, 32-bit RIGHT -> PCM16, shift=%u\n",
         MIC_BCLK_PIN, MIC_WS_PIN, MIC_DATA_PIN,
         static_cast<unsigned long>(SAMPLE_RATE_HZ), MIC_PCM_SHIFT);
+    Serial.printf("[MIC] startup_mute_ms=%u gain_shift=%u (raw diagnostics before mute)\n",
+        unsigned(EARS_MIC_STARTUP_MUTE_MS),MIC_PCM_SHIFT);
     return true;
 }
 
@@ -107,23 +119,46 @@ bool microphoneAudioSourceReadFrame(uint8_t *buffer, size_t bufferSize)
 #endif
         return false;
     }
+    const bool muted=startup.consumeFrame(FRAME_SAMPLES);
     for (size_t i = 0; i < FRAME_SAMPLES; ++i) {
         const int16_t sample = microphonePcm16(rawFrame[i], MIC_PCM_SHIFT);
         // Explicit little-endian output; do not assume byte-buffer alignment.
-        const uint16_t bits = static_cast<uint16_t>(sample);
+        const uint16_t bits = static_cast<uint16_t>(muted ? 0 : sample);
         buffer[i * 2] = static_cast<uint8_t>(bits);
         buffer[i * 2 + 1] = static_cast<uint8_t>(bits >> 8);
 #if EARS_MIC_DIAGNOSTICS
         const uint32_t magnitude = sample < 0 ? -int32_t(sample) : sample;
         if (magnitude > peak) peak = magnitude;
         absoluteSum += magnitude;
+        if(startup.samples()<=uint64_t(SAMPLE_RATE_HZ)*3) {
+            startupSum+=sample;startupSquares+=uint64_t(int64_t(sample)*sample);
+            if(magnitude>startupPeak)startupPeak=magnitude;
+            if(magnitude>=30000) {
+                ++startupNearFull;
+                lastNearFullMs=uint32_t((startup.samples()-FRAME_SAMPLES+i)*1000/SAMPLE_RATE_HZ);
+            }
+            ++startupCount;
+        }
         if (sample == INT16_MIN || sample == INT16_MAX) ++clipped;
 #endif
     }
 #if EARS_MIC_DIAGNOSTICS
+    if(startupCount>=SAMPLE_RATE_HZ/10) {
+        const uint32_t capturedMs=uint32_t(startup.samples()*1000/SAMPLE_RATE_HZ);
+        Serial.printf("[MIC_START] end_ms=%lu peak=%lu rms=%.1f dc=%.1f near_full=%lu last_near_full_ms=%lu muted=%d\n",
+            (unsigned long)capturedMs,(unsigned long)startupPeak,
+            sqrt(double(startupSquares)/startupCount),double(startupSum)/startupCount,
+            (unsigned long)startupNearFull,(unsigned long)lastNearFullMs,muted);
+        startupSquares=0;startupSum=0;startupPeak=startupNearFull=startupCount=0;
+    }
     ++frames;
     reportDiagnostics();
 #endif
+    if(wasMuted && !muted) {
+        Serial.printf("[MIC] startup_ready captured_ms=%lu\n",
+            (unsigned long)(startup.samples()*1000/SAMPLE_RATE_HZ));
+        wasMuted=false;
+    }
     // I2S DMA paces live capture. No additional 20 ms task delay is needed.
     return true;
 }
