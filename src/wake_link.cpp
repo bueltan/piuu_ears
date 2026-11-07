@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "wake_link.h"
 #include "audio_protocol.h"
 #include "control_protocol.h"
@@ -8,13 +9,16 @@
 static HardwareSerial wakeSerial(1);
 
 // Written and reported only by loop(), never by the audio task.
+#if EARS_LOGS_ENABLED
 static uint32_t rxBytes = 0, parsedEvents = 0, invalidEvents = 0, relayErrors = 0;
 static uint32_t lastReport = 0;
 static uint8_t rxSample[16] = {};
 static size_t rxSampleSize = 0;
+#endif
 
 static void reportRx(uint32_t now)
 {
+#if EARS_LOGS_ENABLED
     if (uint32_t(now - lastReport) < 5000) return;
     lastReport = now;
     char hex[sizeof(rxSample) * 3 + 1] = {};
@@ -24,26 +28,36 @@ static void reportRx(uint32_t now)
         hex[i * 3 + 1] = digits[rxSample[i] & 15];
         hex[i * 3 + 2] = ' ';
     }
-    Serial.printf("[WAKE_RX] bytes=%lu events=%lu invalid=%lu relay_errors=%lu sample=%s\n",
+    EARS_LOGF("[WAKE_RX] bytes=%lu events=%lu invalid=%lu relay_errors=%lu sample=%s\n",
         (unsigned long)rxBytes, (unsigned long)parsedEvents,
         (unsigned long)invalidEvents, (unsigned long)relayErrors,
         rxSampleSize ? hex : "-");
     rxSampleSize = 0;
+#else
+    (void)now;
+#endif
 }
 
 static void handleEvent(uint8_t version, uint8_t event, const uint8_t *payload, size_t size)
 {
+#if EARS_LOGS_ENABLED
     ++parsedEvents;
+#endif
     if (version != EVENT_PROTOCOL_VERSION || event == uint8_t(AudioEvent::NONE) ||
         event == uint8_t(AudioEvent::CORE_STREAM_STATE)) {
+#if EARS_LOGS_ENABLED
         ++invalidEvents;
-        Serial.printf("[EARS] Invalid WAKE EVT version=%u event=%u\n", version, event);
+#endif
+        EARS_LOGF("[EARS] Invalid WAKE EVT version=%u event=%u\n", version, event);
         return;
     }
     // Relay known and future events without interpreting their opaque payload.
     const bool sent = coreLinkForwardEvent(event, payload, size);
+#if EARS_LOGS_ENABLED
     if (!sent) ++relayErrors;
-    Serial.printf("[EARS] EVT=%u payload=%u relay=%s\n", event, unsigned(size), sent ? "OK" : "ERROR");
+#endif
+    (void)sent;
+    EARS_LOGF("[EARS] EVT=%u payload=%u relay=%s\n", event, unsigned(size), sent ? "OK" : "ERROR");
 }
 
 static ControlParser eventParser(EVT_MAGIC, handleEvent);
@@ -51,7 +65,7 @@ static ControlParser eventParser(EVT_MAGIC, handleEvent);
 void wakeLinkBegin()
 {
     wakeSerial.begin(UART_BAUD, SERIAL_8N1, WAKE_RX_PIN, WAKE_TX_PIN);
-    Serial.printf("[EARS] WAKE UART ready RX=%d TX=%d @ %lu\n",
+    EARS_LOGF("[EARS] WAKE UART ready RX=%d TX=%d @ %lu\n",
         WAKE_RX_PIN, WAKE_TX_PIN, static_cast<unsigned long>(UART_BAUD));
 }
 
@@ -66,8 +80,10 @@ void wakeLinkProcessRx()
     for (size_t n = 0; n < 256 && wakeSerial.available() > 0; ++n) {
         const int value = wakeSerial.read();
         if (value < 0) break;
+#if EARS_LOGS_ENABLED
         ++rxBytes;
         if (rxSampleSize < sizeof(rxSample)) rxSample[rxSampleSize++] = uint8_t(value);
+#endif
         eventParser.feed(uint8_t(value), millis());
     }
     reportRx(millis());

@@ -5,8 +5,8 @@
 bool coreLinkBegin();
 void coreLinkProcessRx();
 bool coreLinkSendAudio(uint32_t sequence, const uint8_t *pcm, size_t payloadBytes);
-// Forwards the original event and payload. WAKE enables audio under the same
-// TX lock after the event, including repeated wake events during streaming.
+// Forwards the original event and payload. An initial WAKE enables both routes
+// under the TX lock after the event; repeated WAKE preserves the current routing.
 bool coreLinkForwardEvent(uint8_t event, const uint8_t *payload, size_t payloadBytes);
 
 void coreLinkPause();

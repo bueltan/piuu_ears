@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "uart_diagnostics.h"
 #if EARS_UART_DIAGNOSTICS
 #include <Arduino.h>
@@ -56,7 +57,7 @@ void poll() {
     report=window;window=Window{};
     portEXIT_CRITICAL(&lock);
     // USB formatting only in loop(), never in the audio task or lock.
-    Serial.printf("[UART_TX t=%lu] frames=%lu seq_first=%lu seq_last=%lu wake_n=%lu wake_avg_us=%lu wake_max_us=%lu wake_over20=%lu wake_err=%lu core_n=%lu core_avg_us=%lu core_max_us=%lu core_over20=%lu core_err=%lu route_avg_us=%lu route_max_us=%lu route_over20=%lu\n",
+    EARS_LOGF("[UART_TX t=%lu] frames=%lu seq_first=%lu seq_last=%lu wake_n=%lu wake_avg_us=%lu wake_max_us=%lu wake_over20=%lu wake_err=%lu core_n=%lu core_avg_us=%lu core_max_us=%lu core_over20=%lu core_err=%lu route_avg_us=%lu route_max_us=%lu route_over20=%lu\n",
         (unsigned long)now,(unsigned long)report.frames,(unsigned long)report.first,(unsigned long)report.last,
         (unsigned long)report.wake.n,(unsigned long)(report.wake.n?report.wake.total/report.wake.n:0),
         (unsigned long)report.wake.max,(unsigned long)report.wake.over,(unsigned long)report.wakeErrors,
@@ -64,7 +65,7 @@ void poll() {
         (unsigned long)report.core.max,(unsigned long)report.core.over,(unsigned long)report.coreErrors,
         (unsigned long)(report.route.n?report.route.total/report.route.n:0),
         (unsigned long)report.route.max,(unsigned long)report.route.over);
-    Serial.printf("[AUDIO_PACING t=%lu] periods=%lu late_gt22ms=%lu early_lt18ms=%lu max_period_us=%lu\n",
+    EARS_LOGF("[AUDIO_PACING t=%lu] periods=%lu late_gt22ms=%lu early_lt18ms=%lu max_period_us=%lu\n",
         (unsigned long)now,(unsigned long)report.periods,(unsigned long)report.late,
         (unsigned long)report.early,(unsigned long)report.maxPeriod);
 }

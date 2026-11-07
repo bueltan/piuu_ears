@@ -63,7 +63,7 @@ int main() {
     auto start=packet("CMD!",1);
     // Feed one byte per loop invocation.
     for(auto b:start) { inject(0,{b}); coreLinkProcessRx(); }
-    assert(earsIsStreamingToCore()); expectState(1);
+    assert(earsIsStreamingToCore() && !earsKeywordsEnabled()); expectState(1);
     inject(0,start); coreLinkProcessRx(); expectState(1); // idempotent
     inject(0,packet("CMD!",2,{},2)); coreLinkProcessRx(); // wrong version
     inject(0,packet("CMD!",2,{1})); coreLinkProcessRx(); // invalid payload
@@ -71,6 +71,16 @@ int main() {
     assert(earsIsStreamingToCore() && serialData[0].tx.empty());
     inject(0,packet("CMD!",2)); coreLinkProcessRx();
     assert(!earsIsStreamingToCore()); expectState(0);
+    assert(earsKeywordsEnabled());
+    inject(0,packet("CMD!",3));coreLinkProcessRx();
+    assert(earsIsStreamingToCore() && earsKeywordsEnabled());expectState(1);
+    inject(0,packet("CMD!",3,{0}));coreLinkProcessRx();assert(serialData[0].tx.empty());
+    assert(earsIsStreamingToCore() && earsKeywordsEnabled());
+    inject(0,packet("CMD!",1));coreLinkProcessRx();expectState(1);
+    assert(!earsKeywordsEnabled());
+    inject(1,packet("EVT!",1));wakeLinkProcessRx();
+    assert(!earsKeywordsEnabled());serialData[0].tx.clear(); // In-flight wake preserves speaker gating.
+    inject(0,packet("CMD!",2));coreLinkProcessRx();expectState(0);
     uint8_t pcm[640]={};
     assert(coreLinkSendAudio(5,pcm,sizeof(pcm)) && serialData[0].tx.empty());
     // Unknown future events relay unchanged while off.
@@ -105,5 +115,11 @@ int main() {
     inject(1,{'T','!',1,1,0,0});wakeLinkProcessRx();
     assert(serialData[0].tx.empty() && !earsIsStreamingToCore());
     inject(1,wake);wakeLinkProcessRx();assert(serialData[0].tx==wake);
+#if defined(EARS_LOGS_ENABLED) && !EARS_LOGS_ENABLED
+    serialData[0].tx.clear();
+    inject(0,packet("CMD!",0x10,{1,2,3}));coreLinkProcessRx();
+    assert(serialData[0].tx.empty() && earsIsStreamingToCore());
+    assert(Serial.lines.empty()); // Routing/ACKs still work, USB logs remain absent.
+#endif
     puts("PASS: framing, timeout, commands, event relay and concurrent PCM/EVT serialization");
 }

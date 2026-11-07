@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "audio_source_file.h"
 
 #include "config.h"
@@ -34,7 +35,7 @@ static bool openAudioFile()
 
     if (!audioFile)
     {
-        Serial.printf(
+        EARS_LOGF(
             "[EARS] ERROR opening %s\n",
             AUDIO_FILE
         );
@@ -42,7 +43,7 @@ static bool openAudioFile()
         return false;
     }
 
-    Serial.printf(
+    EARS_LOGF(
         "[EARS] Opened %s size=%u bytes\n",
         AUDIO_FILE,
         static_cast<unsigned>(
@@ -60,20 +61,20 @@ static bool openAudioFile()
 
 bool fileAudioSourceBegin()
 {
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] Mounting LittleFS..."
     );
 
     if (!LittleFS.begin(false))
     {
-        Serial.println(
+        EARS_LOGLN(
             "[EARS] ERROR mounting LittleFS"
         );
 
         return false;
     }
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] LittleFS OK"
     );
 
@@ -85,7 +86,7 @@ bool fileAudioSourceBegin()
     lastWakeTime =
         xTaskGetTickCount();
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] ===== AUDIO START ====="
     );
 
@@ -148,7 +149,7 @@ bool fileAudioSourceReadFrame(
             FRAME_BYTES - bytesRead
         );
 
-        Serial.printf(
+        EARS_LOGF(
             "[EARS] Final partial frame: "
             "%u bytes + silence\n",
             static_cast<unsigned>(
@@ -169,13 +170,13 @@ bool fileAudioSourceReadFrame(
     // End of file
     // --------------------------------------------------------
 
-    Serial.println();
+    EARS_LOGLN();
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] ===== END OF AUDIO ====="
     );
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] Restarting audio in 1 minute..."
     );
 
@@ -185,7 +186,7 @@ bool fileAudioSourceReadFrame(
 
     if (!openAudioFile())
     {
-        Serial.println(
+        EARS_LOGLN(
             "[EARS] Cannot reopen audio file"
         );
 
@@ -209,7 +210,7 @@ bool fileAudioSourceReadFrame(
     lastWakeTime =
         xTaskGetTickCount();
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] ===== AUDIO START ====="
     );
 

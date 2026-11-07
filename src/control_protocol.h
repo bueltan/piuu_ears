@@ -46,7 +46,11 @@ static constexpr uint32_t CONTROL_RX_TIMEOUT_MS = 100;
 enum class CoreCommand : uint8_t
 {
     START_AUDIO = 0x01,
-    STOP_AUDIO = 0x02
+    STOP_AUDIO = 0x02,
+    // Concurrent PCM to CORE + KEYWORD. START_AUDIO remains CORE-only.
+    START_AUDIO_WITH_KEYWORDS = 0x03,
+    // CRC-protected CORE diagnostics; does not change routing or send a stream ACK.
+    DIAGNOSTIC_LOG = 0x10
 };
 
 struct __attribute__((packed)) CommandHeader

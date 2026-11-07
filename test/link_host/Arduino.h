@@ -22,6 +22,11 @@ struct Logger {
         char buffer[1024];std::snprintf(buffer,sizeof(buffer),format,args...);lines.emplace_back(buffer);
     }
     void println(const char *) {}
+    int usbSpace=4096;
+    bool connected=true;
+    explicit operator bool() const { return connected; }
+    int availableForWrite() const { return usbSpace; }
+    size_t write(const uint8_t *p,size_t n) { lines.emplace_back(reinterpret_cast<const char*>(p),n);return n; }
 };
 struct MockEsp { unsigned getFreeHeap() const { return 100000; } };
 static MockEsp ESP;

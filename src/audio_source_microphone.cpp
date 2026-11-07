@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "audio_source_microphone.h"
 
 #include "config.h"
@@ -32,7 +33,7 @@ void reportDiagnostics()
     }
     const uint32_t now = millis();
     if (now - lastReport < 5000) return;
-    Serial.printf("[MIC] frames=%lu peak=%lu mean_abs=%lu clipped=%lu read_errors=%lu rx_overflow=%lu\n",
+    EARS_LOGF("[MIC] frames=%lu peak=%lu mean_abs=%lu clipped=%lu read_errors=%lu rx_overflow=%lu\n",
         static_cast<unsigned long>(frames), static_cast<unsigned long>(peak),
         static_cast<unsigned long>(frames ? absoluteSum / (uint64_t(frames) * FRAME_SAMPLES) : 0),
         static_cast<unsigned long>(clipped), static_cast<unsigned long>(errors),
@@ -72,12 +73,12 @@ bool microphoneAudioSourceBegin()
     esp_err_t err = i2s_driver_install(kMicPort, &config, 0, nullptr);
 #endif
     if (err != ESP_OK) {
-        Serial.printf("[MIC] driver_install failed: %s\n", esp_err_to_name(err));
+        EARS_LOGF("[MIC] driver_install failed: %s\n", esp_err_to_name(err));
         return false;
     }
     err = i2s_set_pin(kMicPort, &pins);
     if (err != ESP_OK) {
-        Serial.printf("[MIC] set_pin failed: %s\n", esp_err_to_name(err));
+        EARS_LOGF("[MIC] set_pin failed: %s\n", esp_err_to_name(err));
         i2s_driver_uninstall(kMicPort);
         return false;
     }
@@ -88,11 +89,13 @@ bool microphoneAudioSourceBegin()
     lastReport = millis();
     startupSquares=0;startupSum=0;startupPeak=startupNearFull=startupCount=lastNearFullMs=0;
 #endif
-    Serial.printf("[MIC] INMP441 I2S0 BCLK=%d WS=%d SD=%d, %lu Hz, 32-bit RIGHT -> PCM16, shift=%u\n",
+    EARS_LOGF("[MIC] INMP441 I2S0 BCLK=%d WS=%d SD=%d, %lu Hz, 32-bit RIGHT -> PCM16, shift=%u\n",
         MIC_BCLK_PIN, MIC_WS_PIN, MIC_DATA_PIN,
         static_cast<unsigned long>(SAMPLE_RATE_HZ), MIC_PCM_SHIFT);
-    Serial.printf("[MIC] startup_mute_ms=%u gain_shift=%u (raw diagnostics before mute)\n",
-        unsigned(EARS_MIC_STARTUP_MUTE_MS),MIC_PCM_SHIFT);
+    EARS_LOGF("[MIC] startup_mute_ms=%u pcm_shift=%u gain=%u%%\n",
+        unsigned(EARS_MIC_STARTUP_MUTE_MS),
+        MIC_PCM_SHIFT,
+        unsigned(MIC_GAIN_PERCENT));
     return true;
 }
 
@@ -121,7 +124,18 @@ bool microphoneAudioSourceReadFrame(uint8_t *buffer, size_t bufferSize)
     }
     const bool muted=startup.consumeFrame(FRAME_SAMPLES);
     for (size_t i = 0; i < FRAME_SAMPLES; ++i) {
-        const int16_t sample = microphonePcm16(rawFrame[i], MIC_PCM_SHIFT);
+
+        // Convert I2S 32-bit to PCM16
+        const int16_t original = microphonePcm16(rawFrame[i], MIC_PCM_SHIFT);
+
+        // Apply configurable digital gain
+        int32_t amplified = (int32_t(original) * MIC_GAIN_PERCENT) / 100;
+
+        // Saturate to PCM16 range
+        if (amplified > INT16_MAX) amplified = INT16_MAX;
+        if (amplified < INT16_MIN) amplified = INT16_MIN;
+
+        const int16_t sample = static_cast<int16_t>(amplified);
         // Explicit little-endian output; do not assume byte-buffer alignment.
         const uint16_t bits = static_cast<uint16_t>(muted ? 0 : sample);
         buffer[i * 2] = static_cast<uint8_t>(bits);
@@ -145,7 +159,7 @@ bool microphoneAudioSourceReadFrame(uint8_t *buffer, size_t bufferSize)
 #if EARS_MIC_DIAGNOSTICS
     if(startupCount>=SAMPLE_RATE_HZ/10) {
         const uint32_t capturedMs=uint32_t(startup.samples()*1000/SAMPLE_RATE_HZ);
-        Serial.printf("[MIC_START] end_ms=%lu peak=%lu rms=%.1f dc=%.1f near_full=%lu last_near_full_ms=%lu muted=%d\n",
+        EARS_LOGF("[MIC_START] end_ms=%lu peak=%lu rms=%.1f dc=%.1f near_full=%lu last_near_full_ms=%lu muted=%d\n",
             (unsigned long)capturedMs,(unsigned long)startupPeak,
             sqrt(double(startupSquares)/startupCount),double(startupSum)/startupCount,
             (unsigned long)startupNearFull,(unsigned long)lastNearFullMs,muted);
@@ -155,7 +169,7 @@ bool microphoneAudioSourceReadFrame(uint8_t *buffer, size_t bufferSize)
     reportDiagnostics();
 #endif
     if(wasMuted && !muted) {
-        Serial.printf("[MIC] startup_ready captured_ms=%lu\n",
+        EARS_LOGF("[MIC] startup_ready captured_ms=%lu\n",
             (unsigned long)(startup.samples()*1000/SAMPLE_RATE_HZ));
         wasMuted=false;
     }

@@ -1,6 +1,9 @@
+#include "ears_log.h"
 #include "core_link.h"
 #include "audio_protocol.h"
 #include "control_parser.h"
+#include "core_log_wire.h"
+#include "core_log_relay.h"
 #include "ears_state.h"
 #include "config.h"
 #include <freertos/FreeRTOS.h>
@@ -23,33 +26,38 @@ static bool sendEventLocked(uint8_t event, const uint8_t *payload, size_t size)
     return !size || coreSerial.write(payload, size) == size;
 }
 
-static void handleCommand(uint8_t version, uint8_t code, const uint8_t *, size_t size)
+static void handleCommand(uint8_t version, uint8_t code, const uint8_t *payload, size_t size)
 {
-    // START/STOP v1 have no payload. Unknown/future commands must not change state.
+    if(version==COMMAND_PROTOCOL_VERSION && code==CoreLogWire::Command) {
+        coreLogRelayReceive(payload,size);return;
+    }
+    // Routing commands v1 have no payload. Unknown commands must not change state.
     if (version != COMMAND_PROTOCOL_VERSION || size != 0 ||
-        (code != uint8_t(CoreCommand::START_AUDIO) && code != uint8_t(CoreCommand::STOP_AUDIO))) {
-        Serial.printf("[EARS] Unsupported CMD version=%u code=%u size=%u\n", version, code, unsigned(size));
+        (code != uint8_t(CoreCommand::START_AUDIO) && code != uint8_t(CoreCommand::STOP_AUDIO) &&
+         code != uint8_t(CoreCommand::START_AUDIO_WITH_KEYWORDS))) {
+        EARS_LOGF("[EARS] Unsupported CMD version=%u code=%u size=%u\n", version, code, unsigned(size));
         return;
     }
     if (!txMutex || xSemaphoreTake(txMutex, portMAX_DELAY) != pdTRUE) return;
-    if (code == uint8_t(CoreCommand::START_AUDIO)) earsStartCoreStream();
-    else earsStopCoreStream();
+    if (code == uint8_t(CoreCommand::STOP_AUDIO)) earsStopCoreStream();
+    else earsStartCoreStream(code == uint8_t(CoreCommand::START_AUDIO_WITH_KEYWORDS));
     const uint8_t active = earsIsStreamingToCore() ? 1 : 0;
     const bool sent = sendEventLocked(uint8_t(AudioEvent::CORE_STREAM_STATE), &active, 1);
+    (void)sent; // The state ACK is sent even when diagnostics are compiled out.
     xSemaphoreGive(txMutex);
-    Serial.printf("[EARS] CMD=%u core=%s state_tx=%d\n", code, active ? "ON" : "OFF", sent);
+    EARS_LOGF("[EARS] CMD=%u core=%s keywords=%s state_tx=%d\n", code, active ? "ON" : "OFF", earsKeywordsEnabled() ? "ON" : "OFF", sent);
 }
 
-static ControlParser commandParser(CMD_MAGIC, handleCommand);
+static ControlParser commandParser(CMD_MAGIC, handleCommand, CoreLogWire::MaxPayload);
 
 bool coreLinkBegin()
 {
     if (txMutex) return true;
     txMutex = xSemaphoreCreateMutex();
     if (!txMutex) return false;
-    coreSerial.setRxBufferSize(256);
+    coreSerial.setRxBufferSize(1024);
     coreSerial.begin(UART_BAUD, SERIAL_8N1, CORE_RX_PIN, CORE_TX_PIN);
-    Serial.printf("[EARS] CORE UART ready RX=%d TX=%d @ %lu\n",
+    EARS_LOGF("[EARS] CORE UART ready RX=%d TX=%d @ %lu\n",
         CORE_RX_PIN, CORE_TX_PIN, static_cast<unsigned long>(UART_BAUD));
     return true;
 }
@@ -63,6 +71,7 @@ void coreLinkProcessRx()
         if (value < 0) break;
         commandParser.feed(uint8_t(value), millis());
     }
+    coreLogRelayPoll();
 }
 
 bool coreLinkSendAudio(uint32_t sequence, const uint8_t *pcm, size_t size)
@@ -81,7 +90,8 @@ bool coreLinkForwardEvent(uint8_t event, const uint8_t *payload, size_t size)
     const bool ok = sendEventLocked(event, payload, size);
     // Never enable initial PCM ahead of its wake event. On TX failure the caller
     // logs the failure; a subsequent wake or explicit START can recover.
-    if (ok && event == uint8_t(AudioEvent::WAKE_WORD)) earsStartCoreStream();
+    // A repeat/in-flight wake must never undo CORE's speaker suppression.
+    if (ok && event == uint8_t(AudioEvent::WAKE_WORD) && !earsIsStreamingToCore()) earsStartCoreStream();
     xSemaphoreGive(txMutex);
     return ok;
 }
@@ -89,7 +99,8 @@ bool coreLinkForwardEvent(uint8_t event, const uint8_t *payload, size_t size)
 // Only called with audio parked and loop RX dispatch disabled.
 void coreLinkPause() {
     coreSerial.flush();coreSerial.end();
-    commandParser=ControlParser(CMD_MAGIC, handleCommand);
+    commandParser=ControlParser(CMD_MAGIC, handleCommand, CoreLogWire::MaxPayload);
+    coreLogRelayReset();
 }
 void coreLinkResume() {
     coreSerial.begin(UART_BAUD,SERIAL_8N1,CORE_RX_PIN,CORE_TX_PIN);

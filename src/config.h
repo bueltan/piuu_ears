@@ -34,7 +34,9 @@ static constexpr int MIC_DATA_PIN = 3;
 // Signed 24-bit microphone samples arrive left-aligned in 32-bit I2S slots.
 // Shift 16 gives PCM16 at unity gain; 15 doubles gain, 14 quadruples it.
 // Conversion saturates instead of wrapping when gain exceeds full scale.
-static constexpr unsigned MIC_PCM_SHIFT = 15;
+static constexpr unsigned MIC_PCM_SHIFT = 16;
+// 100 = ganancia original; 200 = doble amplitud antes de saturar a PCM16.
+static constexpr uint16_t MIC_GAIN_PERCENT = 200;
 static_assert(MIC_PCM_SHIFT >= 8 && MIC_PCM_SHIFT <= 24, "Invalid microphone PCM shift");
 
 // Initial setting, to be tuned from MIC_START measurements in silence.

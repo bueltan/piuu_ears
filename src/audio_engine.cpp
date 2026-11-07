@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "audio_engine.h"
 
 #include "audio_source.h"
@@ -23,7 +24,7 @@ static void audioTask(void *parameter)
 {
     (void)parameter;
 
-    Serial.println(
+    EARS_LOGLN(
         "[EARS] Audio engine started"
     );
 
@@ -58,11 +59,12 @@ static void audioTask(void *parameter)
         }
 
         // ----------------------------------------------------
-        // WAKE recibe audio solo si CORE no esta en streaming
+        // CORE and KEYWORD have independent routes; both can receive the same frame.
         // ----------------------------------------------------
 
-        const bool coreAttempted=earsIsStreamingToCore();
-        const bool wakeAttempted=!coreAttempted;
+        const uint8_t routes=earsAudioRoutes();
+        const bool coreAttempted=(routes&EARS_ROUTE_CORE)!=0;
+        const bool wakeAttempted=(routes&EARS_ROUTE_KEYWORD)!=0;
 #if EARS_UART_DIAGNOSTICS
         const uint32_t readyUs=micros();
         uint32_t wakeDoneUs=readyUs;
@@ -85,8 +87,8 @@ static void audioTask(void *parameter)
             coreAttempted ? (routeDoneUs-(wakeAttempted ? wakeDoneUs : readyUs)) : 0,
             routeDoneUs-readyUs,coreAttempted,wakeOk,coreOk);
 #endif
-        if(wakeAttempted && !wakeOk) Serial.println("[EARS] WAKE UART TX error");
-        if(coreAttempted && !coreOk) Serial.println("[EARS] CORE UART TX error");
+        if(wakeAttempted && !wakeOk) EARS_LOGLN("[EARS] WAKE UART TX error");
+        if(coreAttempted && !coreOk) EARS_LOGLN("[EARS] CORE UART TX error");
 
         // ----------------------------------------------------
         // Este sequence pertenece al frame de audio global.
@@ -100,7 +102,7 @@ static void audioTask(void *parameter)
         // 50 frames * 20 ms = 1 segundo
         if ((totalFrames % 50) == 0)
         {
-            Serial.printf(
+            EARS_LOGF(
                 "[EARS] seq=%lu frames=%lu bytes=%lu core=%s\n",
                 static_cast<unsigned long>(sequence),
                 static_cast<unsigned long>(totalFrames),
@@ -118,7 +120,7 @@ bool audioEngineBegin()
 {
     if (!audioSourceBegin())
     {
-        Serial.println(
+        EARS_LOGLN(
             "[EARS] Audio source initialization failed"
         );
 
@@ -137,7 +139,7 @@ bool audioEngineBegin()
 
     if (result != pdPASS)
     {
-        Serial.println(
+        EARS_LOGLN(
             "[EARS] Cannot create audioEngine task"
         );
 

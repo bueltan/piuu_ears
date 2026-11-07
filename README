@@ -1,5 +1,13 @@
 # C3_EARS — fuente PCM, distribución y relay de control
 
+Variante sin logs: `pio run -e esp32-c3-ears-quiet`. Desactiva mensajes de
+aplicación, diagnósticos MIC/UART y relay de logs CORE, sin formatear ni enviar
+estos textos por USB. Conserva PCM, eventos KEYWORD, ACK de estado, comandos
+USB y el protocolo de mantenimiento/actualización (sus respuestas no son logs).
+`esp32-c3-ears` conserva los diagnósticos habituales. La variante quiet no evita
+el reset que puede provocar abrir el puerto USB; probar sin monitor conectado.
+La ROM puede emitir su mensaje de arranque antes de ejecutar la aplicación.
+
 EARS mantiene separados fuente de audio, motor, enlaces UART, estado y protocolo.
 No interpreta turnos de conversación ni conoce el servidor.
 
@@ -36,7 +44,8 @@ Todos los enlaces UART: 921600 baud, 8N1, tierra común.
 | CORE (UART0) | GPIO6 -> CORE RX | GPIO7 <- CORE TX |
 
 Los pines de CORE deben asignarse según su hardware; no están definidos aquí.
-Serial de diagnóstico usa USB CDC. No mezclar logs con UART0/1 de datos.
+Serial de diagnóstico usa USB CDC. Los logs locales usan USB; los de CORE llegan encapsulados en CMD! y se
+decodifican antes de mostrarlos por USB, sin texto crudo en UART0/1.
 
 ## Micrófono INMP441 — ESP32-C3 SuperMini
 
@@ -60,9 +69,11 @@ INMP441 de 24 bits alineadas a la izquierda a PCM16 little-endian, en frames de
 20 ms usada por la fuente de archivo. Mantiene los mismos paquetes y routing
 hacia KEYWORD siempre y CORE cuando el streaming está habilitado.
 
-`MIC_PCM_SHIFT=16` conserva la escala de la señal. Si el nivel real resulta
-insuficiente, 15 duplica la ganancia y 14 la cuadruplica; la conversión satura
-antes de convertir a int16 para evitar wraparound. No replica el desplazamiento
+`MIC_PCM_SHIFT=16` conserva la escala de la señal y `MIC_GAIN_PERCENT=200`
+duplica la amplitud antes de limitarla al rango PCM16. Los picos que excedan ese
+rango se saturan; con esta ganancia puede aumentar el clipping. `MIC_PCM_SHIFT=15`
+duplicaría la ganancia otra vez y `14` la cuadruplicaría respecto de shift 16.
+No replica el desplazamiento
 `raw >> 8` del legacy, que podía truncar los bits significativos.
 
 Con `EARS_MIC_DIAGNOSTICS=1` en `platformio.ini`, `[MIC]` resume cada cinco
@@ -469,3 +480,83 @@ g++ -std=c++11 -Wall -Wextra -I C3_EARS/test/bridge/mocks -I C3_EARS/src C3_EARS
 En hardware comprobar `info` → vuelta de audio, carga completa → conversación,
 y desconexión durante mantenimiento → recuperación con `run` o nueva carga.
 Cerrar el monitor antes de ejecutar el helper; solo un proceso debe abrir USB.
+
+
+## Puente de diagnóstico CORE → USB (2026-10-29)
+
+El firmware normal `esp32-c3-ears` acepta `CMD!` v1 código `0x10` por el enlace
+CORE y entrega texto con prefijo `[CORE boot=... seq=... t=... reset=...
+lost_bytes=... usb_drop=... bad_crc=...]` en `/dev/esp32-ears` por USB CDC.
+No habilita streaming, no genera ACK de audio y no requiere WiFi. Conserva
+el puente de mantenimiento para programación y su salida/entrada explícitas.
+
+Actualizar EARS antes que CORE (`PIUU_EARS_LOG=1` en entornos UART0).
+Cerrar monitores y capturar desde PIUU_CORE:
+
+```bash
+/home/denis/.platformio/penv/bin/python tools/capture_serial.py --only ears
+```
+
+Los registros de ambas placas quedan en `ears.log` dentro del directorio
+impreso. El USB de CORE no es necesario. El colector no inicia mantenimiento
+ni reinicia placas. Los logs de la computadora sobreviven a un reset de CORE;
+las colas RAM no son persistentes y no incluyen ROM/panic completo.
+
+El paquete usa el encabezado CMD! existente de ocho bytes. Payload de 20..211
+bytes: `boot`, `seq`, `uptime_ms`, `dropped_bytes` (cuatro uint32 little endian),
+`reset_reason` (uint8), texto de 1..192 bytes y CRC16-CCITT (polinomio 0x1021,
+inicial 0xffff, sin XOR final, almacenado little endian) sobre metadata y texto.
+El parser de comandos acepta hasta 211 bytes; el de KEYWORD conserva su límite
+lógico de 32 bytes. Magic dentro del payload se consume como datos. CRC inválido
+se descarta sin afectar routing.
+
+UART RX tiene 1024 bytes y presupuesto de lectura de 256 bytes por vuelta.
+Una cola estática conserva ocho fragmentos (máximo 192 bytes de texto cada uno);
+si se llena descarta el más antiguo y suma `usb_drop`. USB solo recibe líneas
+completas cuando hay espacio. Timeout TX cero en modo normal, incluido el resto
+de diagnósticos EARS; mantenimiento usa 100 ms y al salir se restaura cero.
+Los controles/saltos de CORE se sustituyen por espacios para mantener una línea
+USB por fragmento. No hay retransmisión; los huecos se observan por secuencia y
+contadores. Para máxima continuidad, mantener la captura USB activa.
+
+Validación: desde PIUU_CORE, `bash test/run_ears_log_tests.sh`; desde EARS,
+`bash test/run_audio_routing_tests.sh`. Prueban CRC, fragmentación, output real
+CORE→EARS, USB saturado, colas limitadas y comandos aún operativos. La validación
+de audio y microcortes en hardware queda pendiente de cargar ambos firmwares.
+
+
+## Comandos USB para el prototipo PIUU_EYES
+
+Con EARS `esp32-c3-ears` y PIUU_EYES actualizados, la consola USB acepta
+`EYES <comando>` terminado en LF o CRLF. Ejemplos:
+
+```text
+EYES cell 3
+EYES color cyan
+EYES activity speaking
+EYES volume 60
+EYES battery 18
+EYES tap 1
+```
+
+Se reenvían 1–31 bytes ASCII imprimibles dentro de EVT! v1 código 0x06.
+`[EYES_USB] forwarded` confirma escritura en UART, no aceptación por el destino;
+el prototipo responde `OK` o `Rejected` mediante los logs CORE retransmitidos.
+Este código es una extensión de desarrollo de PIUU_EYES, no un evento operativo
+implementado por PIUU_CORE. Los eventos normales de EARS código 0x05 conservan
+su identidad y sus restricciones. El código 0x06 representa una solicitud local
+de prueba y permite simular actividad, batería, volumen y toque sin abrir audio.
+
+No entra en mantenimiento ni resetea CORE. El envío usa el mismo bloqueo UART
+que los eventos existentes y no intercala bytes con PCM. No modifica el estado de
+ruteo. `PIUU BRIDGE` conserva su función. Una línea inválida/larga o interrumpida
+por más de un segundo se descarta. La cola de captura y un monitor interactivo
+no deben abrir simultáneamente `/dev/esp32-ears`; cerrar la captura antes de usar
+el monitor, y cerrar el monitor antes de flashear.
+
+Prueba del parser USB y aislamiento del comando de mantenimiento:
+
+```sh
+g++ -std=c++11 -Wall -Wextra -Werror -Isrc test/eyes_usb/test_eyes_usb.cpp -o /tmp/ears-eyes-usb-test
+/tmp/ears-eyes-usb-test
+```

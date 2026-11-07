@@ -10,8 +10,8 @@ class ControlParser
 public:
     using Handler = void (*)(uint8_t version, uint8_t code,
                              const uint8_t *payload, size_t size);
-    ControlParser(const uint8_t *magic, Handler handler)
-        : magic_(magic), handler_(handler) {}
+    ControlParser(const uint8_t *magic, Handler handler, size_t capacity=32)
+        : magic_(magic), handler_(handler), capacity_(capacity>sizeof(payload_)?sizeof(payload_):capacity) {}
     void expire(uint32_t now, uint32_t timeout)
     {
         if (inProgress() && uint32_t(now - lastByte_) >= timeout) reset();
@@ -30,7 +30,7 @@ public:
             length_ = uint16_t(header_[2]) | (uint16_t(header_[3]) << 8);
             used_ = 0;
             if (!length_) { deliver(); return; }
-            state_ = length_ <= sizeof(payload_) ? Payload : Discard;
+            state_ = length_ <= capacity_ ? Payload : Discard;
             return;
         }
         if (state_ == Payload) payload_[used_] = byte;
@@ -44,7 +44,8 @@ private:
     const uint8_t *magic_;
     Handler handler_;
     uint8_t header_[4] = {};
-    uint8_t payload_[32] = {};
+    uint8_t payload_[224] = {};
+    size_t capacity_;
     size_t matched_ = 0, used_ = 0;
     uint16_t length_ = 0;
     uint32_t lastByte_ = 0;

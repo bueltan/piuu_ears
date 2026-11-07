@@ -1,3 +1,4 @@
+#include "ears_log.h"
 #include "audio_source.h"
 
 #include "audio_source_file.h"
@@ -11,7 +12,7 @@ bool audioSourceBegin()
     {
         case AudioSourceType::FILE_REPLAY:
 
-            Serial.println(
+            EARS_LOGLN(
                 "[EARS] Audio source: FILE_REPLAY"
             );
 
@@ -20,7 +21,7 @@ bool audioSourceBegin()
 
         case AudioSourceType::MICROPHONE:
 
-            Serial.println(
+            EARS_LOGLN(
                 "[EARS] Audio source: MICROPHONE"
             );
 
